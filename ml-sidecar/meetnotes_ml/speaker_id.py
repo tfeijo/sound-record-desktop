@@ -88,6 +88,9 @@ class SpeakerIdentifier:
         """
         # Sanitize name for filesystem
         safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in name).strip()
+        safe_name = safe_name[:100]
+        if not safe_name:
+            raise ValueError("Speaker name produces empty filename after sanitization")
         path = os.path.join(self._embeddings_dir, f"{safe_name}.npy")
         np.save(path, embedding)
         logger.info(f"Saved embedding for '{name}' at {path}")
@@ -96,7 +99,7 @@ class SpeakerIdentifier:
     def load_embedding(self, path: str) -> np.ndarray | None:
         """Load a speaker embedding from disk."""
         try:
-            return np.load(path)
+            return np.load(path, allow_pickle=False)
         except Exception as e:
             logger.error(f"Failed to load embedding from {path}: {e}")
             return None

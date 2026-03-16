@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   listSpeakers,
   createSpeaker,
@@ -16,6 +16,7 @@ export function SpeakerManager() {
   const [newName, setNewName] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  const escapePressedRef = useRef(false);
 
   const fetchSpeakers = useCallback(async () => {
     try {
@@ -144,9 +145,18 @@ export function SpeakerManager() {
                   onChange={(e) => setEditName(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") handleUpdate(profile.id);
-                    if (e.key === "Escape") setEditingId(null);
+                    if (e.key === "Escape") {
+                      escapePressedRef.current = true;
+                      setEditingId(null);
+                    }
                   }}
-                  onBlur={() => handleUpdate(profile.id)}
+                  onBlur={() => {
+                    if (escapePressedRef.current) {
+                      escapePressedRef.current = false;
+                      return;
+                    }
+                    handleUpdate(profile.id);
+                  }}
                   autoFocus
                   className="flex-1 rounded border border-neutral-600 bg-neutral-800 px-2 py-1 text-sm text-neutral-200 outline-none focus:border-blue-500"
                   aria-label={`Edit name for ${profile.name}`}

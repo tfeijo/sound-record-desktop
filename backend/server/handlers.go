@@ -444,6 +444,10 @@ func (h *Handlers) CreateSpeaker(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
 		return
 	}
+	if len(body.Name) > 100 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name too long (max 100 chars)"})
+		return
+	}
 
 	profile := &models.SpeakerProfile{
 		ID:   uuid.New().String(),
@@ -482,6 +486,10 @@ func (h *Handlers) UpdateSpeaker(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		return
+	}
+	if len(body.Name) > 100 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name too long (max 100 chars)"})
 		return
 	}
 
@@ -528,6 +536,10 @@ func (h *Handlers) EnrollSpeaker(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		return
+	}
+	if len(body.Name) > 100 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name too long (max 100 chars)"})
 		return
 	}
 	if body.MeetingID == "" {

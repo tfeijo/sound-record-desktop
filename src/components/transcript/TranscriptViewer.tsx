@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { TranscriptionResult } from "@/lib/types";
 import { SpeakerSegment } from "./SpeakerSegment";
 
@@ -21,6 +21,11 @@ export function TranscriptViewer({
   onTranscriptUpdate,
 }: TranscriptViewerProps) {
   const [transcript, setTranscript] = useState(initialTranscript);
+
+  // Sync with parent prop changes (e.g. after meeting reload)
+  useEffect(() => {
+    setTranscript(initialTranscript);
+  }, [initialTranscript]);
 
   const speakerList = useMemo(
     () => transcript.speakers.map((s) => s.id),
