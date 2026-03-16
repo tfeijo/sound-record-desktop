@@ -7,6 +7,139 @@ use cpal::SampleFormat;
 
 use super::wav_writer::WavWriter;
 
+/// Request microphone permission from macOS via AVFoundation Objective-C runtime.
+/// CoreAudio (cpal) doesn't trigger the TCC dialog — it silently returns zeros.
+#[cfg(target_os = "macos")]
+fn ensure_microphone_permission() -> Result<(), String> {
+    use std::ffi::{c_char, c_long, c_void};
+
+    #[link(name = "AVFoundation", kind = "framework")]
+    extern "C" {}
+
+    #[link(name = "objc", kind = "dylib")]
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+    }
+
+    const AV_AUTH_AUTHORIZED: c_long = 3;
+
+    unsafe {
+        let cls = objc_getClass(b"AVCaptureDevice\0".as_ptr() as *const c_char);
+        if cls.is_null() {
+            log::warn!("AVCaptureDevice not available, skipping permission check");
+            return Ok(());
+        }
+
+        // Create NSString @"soun" (AVMediaTypeAudio)
+        let ns_cls = objc_getClass(b"NSString\0".as_ptr() as *const c_char);
+        let sel_str =
+            sel_registerName(b"stringWithUTF8String:\0".as_ptr() as *const c_char);
+        let msg_str: extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as *const c_void);
+        let media = msg_str(ns_cls, sel_str, b"soun\0".as_ptr() as *const c_char);
+
+        // Check status
+        let sel_auth =
+            sel_registerName(b"authorizationStatusForMediaType:\0".as_ptr() as *const c_char);
+        let msg_auth: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> c_long =
+            std::mem::transmute(objc_msgSend as *const c_void);
+        let status = msg_auth(cls, sel_auth, media);
+
+        log::info!("macOS mic authorization status: {} (3=authorized, 0=notDetermined, 1=restricted, 2=denied)", status);
+
+        if status == AV_AUTH_AUTHORIZED {
+            return Ok(());
+        }
+
+        // For notDetermined (0): call requestAccessForMediaType:completionHandler:
+        // We use a C block via raw memory layout
+        if status == 0 {
+            log::info!("Requesting microphone access from user...");
+
+            // Use a simple polling approach: request access then poll status
+            // The block is tricky in raw FFI, so we use a minimal void block
+            // that just signals, and poll the status
+
+            // Minimal block layout (captures nothing, does nothing)
+            #[repr(C)]
+            struct Block {
+                isa: *const c_void,
+                flags: i32,
+                reserved: i32,
+                invoke: extern "C" fn(*mut Block, bool),
+                descriptor: *const BlockDescriptor,
+            }
+
+            #[repr(C)]
+            struct BlockDescriptor {
+                reserved: u64,
+                size: u64,
+            }
+
+            extern "C" fn block_invoke(_block: *mut Block, _granted: bool) {
+                // no-op — we poll status instead
+            }
+
+            extern "C" {
+                static _NSConcreteStackBlock: *const c_void;
+            }
+
+            let descriptor = BlockDescriptor {
+                reserved: 0,
+                size: std::mem::size_of::<Block>() as u64,
+            };
+
+            let block = Block {
+                isa: &_NSConcreteStackBlock as *const _ as *const c_void,
+                flags: 0,
+                reserved: 0,
+                invoke: block_invoke,
+                descriptor: &descriptor,
+            };
+
+            let sel_request = sel_registerName(
+                b"requestAccessForMediaType:completionHandler:\0".as_ptr() as *const c_char,
+            );
+            let msg_req: extern "C" fn(
+                *mut c_void,
+                *mut c_void,
+                *mut c_void,
+                *const Block,
+            ) = std::mem::transmute(objc_msgSend as *const c_void);
+            msg_req(cls, sel_request, media, &block);
+
+            // Poll for up to 30 seconds
+            for i in 0..60 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let new_status = msg_auth(cls, sel_auth, media);
+                if new_status != 0 {
+                    log::info!("Mic permission resolved to status: {}", new_status);
+                    return if new_status == AV_AUTH_AUTHORIZED {
+                        Ok(())
+                    } else {
+                        Err("Microphone permission denied. Enable in System Settings > Privacy & Security > Microphone.".to_string())
+                    };
+                }
+                if i == 0 {
+                    log::info!("Waiting for user to respond to microphone permission dialog...");
+                }
+            }
+
+            return Err("Microphone permission request timed out. Enable in System Settings > Privacy & Security > Microphone.".to_string());
+        }
+
+        // denied or restricted
+        Err("Microphone permission denied. Enable in System Settings > Privacy & Security > Microphone.".to_string())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_microphone_permission() -> Result<(), String> {
+    Ok(())
+}
+
 /// Resamples audio from `from_rate` to `to_rate` using linear interpolation.
 fn resample(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16> {
     if from_rate == to_rate {
@@ -134,6 +267,9 @@ impl MicRecorder {
             return Err("Already recording".to_string());
         }
 
+        // Ensure we have mic permission before opening the audio stream
+        ensure_microphone_permission()?;
+
         let wav = WavWriter::new(&path)?;
         *self.writer.lock().map_err(|e| e.to_string())? = Some(wav);
         *self.wav_path.lock().map_err(|e| e.to_string())? = Some(path);
@@ -230,29 +366,43 @@ fn run_recording_thread(
         .build_input_stream_raw(
             &config.into(),
             sample_format,
-            move |data: &cpal::Data, _: &cpal::InputCallbackInfo| {
-                if recording_flag.load(Ordering::SeqCst) {
-                    return;
-                }
+            {
+                let mut callback_count = 0u64;
+                move |data: &cpal::Data, _: &cpal::InputCallbackInfo| {
+                    if recording_flag.load(Ordering::SeqCst) {
+                        return;
+                    }
 
-                let raw_bytes = data.bytes();
-                let i16_samples = samples_to_i16(raw_bytes, sample_format);
+                    let raw_bytes = data.bytes();
 
-                // Mix to mono
-                let mono = mix_to_mono(&i16_samples, device_channels);
+                    // Log first few callbacks to verify data is arriving
+                    callback_count += 1;
+                    if callback_count <= 3 || callback_count % 200 == 0 {
+                        let non_zero = raw_bytes.iter().filter(|&&b| b != 0).count();
+                        log::info!(
+                            "[mic] callback #{}: {} bytes, {} non-zero, format={:?}",
+                            callback_count, raw_bytes.len(), non_zero, sample_format
+                        );
+                    }
 
-                // Calculate level before resampling (more responsive)
-                let level = calculate_rms_level(&mono);
-                level_callback(level);
+                    let i16_samples = samples_to_i16(raw_bytes, sample_format);
 
-                // Resample to target rate
-                let resampled = resample(&mono, device_sample_rate, target_rate);
+                    // Mix to mono
+                    let mono = mix_to_mono(&i16_samples, device_channels);
 
-                // Write to WAV
-                if let Ok(mut guard) = writer.lock() {
-                    if let Some(ref mut w) = *guard {
-                        if let Err(e) = w.write_samples(&resampled) {
-                            log::error!("Failed to write audio samples: {}", e);
+                    // Calculate level before resampling (more responsive)
+                    let level = calculate_rms_level(&mono);
+                    level_callback(level);
+
+                    // Resample to target rate
+                    let resampled = resample(&mono, device_sample_rate, target_rate);
+
+                    // Write to WAV
+                    if let Ok(mut guard) = writer.lock() {
+                        if let Some(ref mut w) = *guard {
+                            if let Err(e) = w.write_samples(&resampled) {
+                                log::error!("Failed to write audio samples: {}", e);
+                            }
                         }
                     }
                 }

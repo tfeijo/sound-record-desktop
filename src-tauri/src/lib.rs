@@ -8,6 +8,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(sidecar::SidecarState::new())
         .manage(commands::RecordingState::new())
         .manage(audio::capture::AudioCapture::new().expect("Failed to initialize AudioCapture"))

@@ -113,14 +113,33 @@ export function SettingsForm() {
         <p className="mb-2 text-xs text-neutral-500">
           Full path to your Obsidian vault directory. Meeting reports will be saved to a Meetings/ subfolder.
         </p>
-        <input
-          id="obsidian_vault_path"
-          type="text"
-          value={settings.obsidian_vault_path ?? ""}
-          onChange={(e) => handleChange("obsidian_vault_path", e.target.value)}
-          placeholder="/Users/you/Documents/MyVault"
-          className="w-full rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-200 placeholder-neutral-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/50"
-        />
+        <div className="flex gap-2">
+          <input
+            id="obsidian_vault_path"
+            type="text"
+            value={settings.obsidian_vault_path ?? ""}
+            onChange={(e) => handleChange("obsidian_vault_path", e.target.value)}
+            placeholder="/Users/you/Documents/MyVault"
+            className="flex-1 rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-200 placeholder-neutral-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/50"
+          />
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                const { open } = await import("@tauri-apps/plugin-dialog");
+                const selected = await open({ directory: true, multiple: false, title: "Select Obsidian Vault" });
+                if (selected) {
+                  handleChange("obsidian_vault_path", selected as string);
+                }
+              } catch {
+                // Not running in Tauri (browser dev mode) — ignore
+              }
+            }}
+            className="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-400 transition-colors hover:bg-neutral-700 hover:text-neutral-200"
+          >
+            Browse…
+          </button>
+        </div>
       </div>
 
       {/* Whisper Model Size */}
