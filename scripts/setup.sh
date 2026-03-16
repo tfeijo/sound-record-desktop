@@ -22,6 +22,7 @@ SKIP_ML=false
 for arg in "$@"; do
   case "$arg" in
     --skip-ml) SKIP_ML=true ;;
+    *) echo "Unknown argument: $arg"; echo "Usage: $0 [--skip-ml]"; exit 1 ;;
   esac
 done
 
@@ -50,8 +51,11 @@ step "Checking system prerequisites..."
 
 MISSING=()
 
+# rustc implies cargo (both installed by rustup)
 check_command rustc   || MISSING+=(rust)
-check_command cargo   || MISSING+=(rust)
+if command -v rustc &>/dev/null; then
+  check_command cargo || MISSING+=(rust)
+fi
 check_command go      || MISSING+=(go)
 check_command node    || MISSING+=(node)
 check_command pnpm    || MISSING+=(pnpm)
@@ -94,10 +98,6 @@ cd "$PROJECT_DIR/backend"
 go mod download
 ok "Go modules downloaded"
 
-# Verify build
-go build ./...
-ok "Go backend compiles"
-
 # ── 4. Build Go backend binary for Tauri sidecar ──────────────────
 
 step "Building Go backend binary for Tauri..."
@@ -119,6 +119,8 @@ else
 fi
 
 # ── 5. Python ML sidecar ──────────────────────────────────────────
+
+VENV_PYTHON=""
 
 if [ "$SKIP_ML" = true ]; then
   warn "Skipping Python ML sidecar (--skip-ml). Transcription will not work."
@@ -177,15 +179,8 @@ else
     deactivate
     cd "$PROJECT_DIR"
 
+    VENV_PYTHON="$VENV_DIR/bin/python3"
     ok "Python ML sidecar ready"
-
-    # Remind about Python path for the Go sidecar manager
-    echo ""
-    warn "The Go backend spawns Python as 'python3'. For it to find the venv:"
-    echo "    Option A: Activate the venv before running:  source ml-sidecar/.venv/bin/activate"
-    echo "    Option B: Symlink: ln -sf ml-sidecar/.venv/bin/python3 /usr/local/bin/python3"
-    echo "    Option C: Set in .env:  MEETNOTES_PYTHON=ml-sidecar/.venv/bin/python3"
-    echo ""
   fi
 fi
 
@@ -195,11 +190,12 @@ step "Checking Tauri Rust build..."
 cd "$PROJECT_DIR/src-tauri"
 
 # Just check that cargo can resolve deps (don't do a full build — it's slow)
-if cargo check 2>&1 | tail -5; then
+CARGO_OUTPUT=$(cargo check 2>&1) && {
   ok "Tauri Rust dependencies resolve"
-else
-  warn "Tauri cargo check had warnings (may still work)"
-fi
+} || {
+  warn "Tauri cargo check had issues (may still work)"
+  echo "$CARGO_OUTPUT" | tail -5
+}
 
 cd "$PROJECT_DIR"
 
@@ -207,31 +203,35 @@ cd "$PROJECT_DIR"
 
 step "Checking environment configuration..."
 
-if [ -f .env ]; then
-  ok ".env file exists"
-
-  # Check for required keys
-  if grep -q "^ANTHROPIC_API_KEY=.\+" .env 2>/dev/null; then
-    ok "ANTHROPIC_API_KEY is set"
-  else
-    warn "ANTHROPIC_API_KEY not set — AI summarization will be disabled"
-  fi
-
-  if grep -q "^HF_TOKEN=.\+" .env 2>/dev/null; then
-    ok "HF_TOKEN is set"
-  else
-    warn "HF_TOKEN not set — speaker diarization will be disabled"
-  fi
-else
+if [ ! -f .env ]; then
   cp .env.example .env
-  warn ".env created from .env.example — edit it with your API keys:"
-  echo ""
-  echo "    ${YELLOW}ANTHROPIC_API_KEY${NC}=sk-ant-...   (Claude — for meeting summarization)"
-  echo "    ${YELLOW}HF_TOKEN${NC}=hf_...               (HuggingFace — for pyannote diarization)"
-  echo ""
+  warn ".env created from .env.example"
 fi
 
-# ── 8. Create data directories ─────────────────────────────────────
+# Auto-set MEETNOTES_PYTHON if we created a venv
+if [ -n "$VENV_PYTHON" ] && [ -f "$VENV_PYTHON" ]; then
+  if grep -q "^MEETNOTES_PYTHON=" .env 2>/dev/null; then
+    sed -i '' "s|^MEETNOTES_PYTHON=.*|MEETNOTES_PYTHON=$VENV_PYTHON|" .env
+  else
+    echo "MEETNOTES_PYTHON=$VENV_PYTHON" >> .env
+  fi
+  ok "MEETNOTES_PYTHON set to $VENV_PYTHON"
+fi
+
+# Check for API keys
+if grep -q "^ANTHROPIC_API_KEY=.\+" .env 2>/dev/null; then
+  ok "ANTHROPIC_API_KEY is set"
+else
+  warn "ANTHROPIC_API_KEY not set — AI summarization will be disabled"
+fi
+
+if grep -q "^HF_TOKEN=.\+" .env 2>/dev/null; then
+  ok "HF_TOKEN is set"
+else
+  warn "HF_TOKEN not set — speaker diarization will be disabled"
+fi
+
+# ── 8. Create data directories (macOS) ────────────────────────────
 
 step "Creating data directories..."
 mkdir -p ~/Library/Application\ Support/MeetNotes/recordings
@@ -250,11 +250,9 @@ echo ""
 echo "    ${BLUE}make dev${NC}          Frontend (localhost:3100) + Go backend (localhost:9876)"
 echo "    ${BLUE}make dev-tauri${NC}    Full desktop app with Tauri window + system tray"
 echo ""
-echo "  Before running, make sure to:"
-echo "    1. Edit ${YELLOW}.env${NC} with your API keys (if not done)"
-if [ "$SKIP_ML" = false ]; then
-echo "    2. Activate Python venv: ${YELLOW}source ml-sidecar/.venv/bin/activate${NC}"
-fi
+echo "  Before running, make sure to edit ${YELLOW}.env${NC} with your API keys (if not done):"
+echo "    ${YELLOW}ANTHROPIC_API_KEY${NC}=sk-ant-...   (Claude — for meeting summarization)"
+echo "    ${YELLOW}HF_TOKEN${NC}=hf_...               (HuggingFace — for pyannote diarization)"
 echo ""
 echo "  macOS permissions (granted on first use):"
 echo "    - Microphone access (for recording)"
