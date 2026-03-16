@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"log"
@@ -12,13 +13,16 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/tfeijo/sound-record-desktop/backend/models"
+	"github.com/tfeijo/sound-record-desktop/backend/pipeline"
 	"github.com/tfeijo/sound-record-desktop/backend/store"
 )
 
 // Handlers holds dependencies for HTTP handler methods.
 type Handlers struct {
-	Store *store.Store
-	Hub   *Hub
+	Store    *store.Store
+	Hub      *Hub
+	Pipeline *pipeline.Runner
+	AppCtx   context.Context // server lifecycle context for background work
 
 	mu        sync.RWMutex
 	state     string // idle, recording, processing, done, error
@@ -26,11 +30,13 @@ type Handlers struct {
 }
 
 // NewHandlers creates a Handlers with default recording state.
-func NewHandlers(s *store.Store, hub *Hub) *Handlers {
+func NewHandlers(s *store.Store, hub *Hub, appCtx context.Context) *Handlers {
 	return &Handlers{
-		Store: s,
-		Hub:   hub,
-		state: "idle",
+		Store:    s,
+		Hub:      hub,
+		Pipeline: pipeline.NewRunner(s, hub),
+		AppCtx:   appCtx,
+		state:    "idle",
 	}
 }
 
@@ -96,17 +102,35 @@ type stopRecordingRequest struct {
 
 // StopRecording handles POST /api/recording/stop.
 func (h *Handlers) StopRecording(w http.ResponseWriter, r *http.Request) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	// Parse optional body with file paths from Tauri
 	var body stopRecordingRequest
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 
-	if h.meetingID != "" {
-		meeting, err := h.Store.GetMeeting(h.meetingID)
+	meetingID, hasAudio := h.stopRecordingLocked(body)
+
+	// Trigger transcription pipeline in background (outside the lock)
+	if meetingID != "" && hasAudio {
+		h.Pipeline.RunAfterRecording(h.AppCtx, meetingID)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "idle",
+	})
+}
+
+// stopRecordingLocked handles all state changes under the mutex and returns
+// the meeting ID and whether audio files exist for pipeline processing.
+func (h *Handlers) stopRecordingLocked(body stopRecordingRequest) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	meetingID := h.meetingID
+	hasAudio := body.MicPath != "" || body.SystemPath != ""
+
+	if meetingID != "" {
+		meeting, err := h.Store.GetMeeting(meetingID)
 		if err == nil {
 			now := time.Now().UTC()
 			meeting.EndTime = &now
@@ -117,27 +141,28 @@ func (h *Handlers) StopRecording(w http.ResponseWriter, r *http.Request) {
 			}
 			meeting.MicPath = body.MicPath
 			meeting.SystemPath = body.SystemPath
-			meeting.Status = models.StatusDone
+			if hasAudio {
+				meeting.Status = models.StatusTranscribing
+			} else {
+				meeting.Status = models.StatusDone
+			}
 			if err := h.Store.UpdateMeeting(meeting); err != nil {
 				log.Printf("Error updating meeting on stop: %v", err)
 			}
 		}
 	}
 
-	// Broadcast recording stopped via WebSocket
 	h.Hub.Broadcast(Message{
 		Type: "recording:stopped",
 		Payload: map[string]string{
-			"meetingId": h.meetingID,
+			"meetingId": meetingID,
 		},
 	})
 
 	h.state = "idle"
 	h.meetingID = ""
 
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status": "idle",
-	})
+	return meetingID, hasAudio
 }
 
 // GetRecordingStatus handles GET /api/recording/status.
