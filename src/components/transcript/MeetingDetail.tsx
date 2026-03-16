@@ -53,21 +53,34 @@ export function MeetingDetail({ meetingId }: MeetingDetailProps) {
       const m = await getMeeting(meetingId);
       setMeeting(m);
 
+      // Parse transcript and summary independently so one bad field
+      // does not prevent the other from loading
       if (m.transcriptJson) {
-        const parsed = JSON.parse(m.transcriptJson);
-        if (parsed && Array.isArray(parsed.segments)) {
-          setTranscript(parsed as TranscriptionResult);
+        try {
+          const parsed = JSON.parse(m.transcriptJson);
+          if (parsed && Array.isArray(parsed.segments)) {
+            setTranscript(parsed as TranscriptionResult);
+          }
+        } catch {
+          // Malformed transcript JSON — skip silently
         }
       }
 
       if (m.summaryJson) {
-        const parsed = JSON.parse(m.summaryJson);
-        if (parsed && typeof parsed.summary === "string") {
-          setSummary(parsed as MeetingSummary);
+        try {
+          const parsed = JSON.parse(m.summaryJson);
+          if (parsed && typeof parsed.summary === "string") {
+            setSummary(parsed as MeetingSummary);
+          }
+        } catch {
+          // Malformed summary JSON — skip silently
         }
       }
+
+      return m;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load meeting");
+      return null;
     } finally {
       setLoading(false);
     }
@@ -87,13 +100,29 @@ export function MeetingDetail({ meetingId }: MeetingDetailProps) {
   const handleRegenerate = async () => {
     if (regenerating) return;
     setRegenerating(true);
+    setError(null);
     try {
       await regenerateSummary(meetingId);
-      // Poll for updated meeting after a delay
-      setTimeout(async () => {
-        await loadMeeting();
-        setRegenerating(false);
-      }, 3000);
+      // Poll until meeting status returns to "done" (or error/timeout)
+      const maxAttempts = 30; // ~60 seconds max
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        attempts++;
+        try {
+          const m = await getMeeting(meetingId);
+          if (m.status === "done" || m.status === "error" || attempts >= maxAttempts) {
+            clearInterval(poll);
+            await loadMeeting();
+            setRegenerating(false);
+            if (m.summaryJson) {
+              setActiveTab("summary");
+            }
+          }
+        } catch {
+          clearInterval(poll);
+          setRegenerating(false);
+        }
+      }, 2000);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to regenerate");
       setRegenerating(false);
