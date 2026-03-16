@@ -241,6 +241,25 @@ func (s *Store) SetSetting(key, value string) error {
 	return err
 }
 
+// GetAllSettings returns all settings as a key-value map.
+func (s *Store) GetAllSettings() (map[string]string, error) {
+	rows, err := s.db.Query("SELECT key, value FROM settings")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	settings := map[string]string{}
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, err
+		}
+		settings[key] = value
+	}
+	return settings, rows.Err()
+}
+
 // --- Helpers ---
 
 // scanner is an interface satisfied by both *sql.Row and *sql.Rows.

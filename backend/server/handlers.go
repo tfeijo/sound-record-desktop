@@ -353,6 +353,37 @@ func (h *Handlers) GetMeetDetectStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetSettings handles GET /api/settings.
+func (h *Handlers) GetSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := h.Store.GetAllSettings()
+	if err != nil {
+		log.Printf("Error getting settings: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to get settings"})
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
+}
+
+// UpdateSettings handles PUT /api/settings.
+// Accepts a JSON object of key-value pairs to upsert.
+func (h *Handlers) UpdateSettings(w http.ResponseWriter, r *http.Request) {
+	var settings map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+
+	for key, value := range settings {
+		if err := h.Store.SetSetting(key, value); err != nil {
+			log.Printf("Error setting %s: %v", key, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save settings"})
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, settings)
+}
+
 // writeJSON encodes data as JSON and writes it to the response with the given status code.
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	if data == nil {
