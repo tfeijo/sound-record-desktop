@@ -21,11 +21,16 @@ func NewRouter(hub *Hub) http.Handler {
 	// WebSocket endpoint
 	r.Get("/ws", hub.HandleWebSocket)
 
-	// Future API routes
+	// API routes
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]string{"message": "MeetNotes API"})
 		})
+
+		// Recording endpoints
+		r.Post("/recording/start", StartRecording)
+		r.Post("/recording/stop", StopRecording)
+		r.Get("/recording/status", GetRecordingStatus)
 	})
 
 	// Wrap with CORS for local development
