@@ -8,6 +8,7 @@ import (
 	"log"
 
 	"github.com/tfeijo/sound-record-desktop/backend/models"
+	"github.com/tfeijo/sound-record-desktop/backend/obsidian"
 	"github.com/tfeijo/sound-record-desktop/backend/store"
 	"github.com/tfeijo/sound-record-desktop/backend/summarizer"
 	"github.com/tfeijo/sound-record-desktop/backend/transcriber"
@@ -18,7 +19,7 @@ type Broadcaster interface {
 	BroadcastJSON(msgType string, payload interface{})
 }
 
-// Runner orchestrates the post-recording pipeline: transcription → summarization → (future: obsidian).
+// Runner orchestrates the post-recording pipeline: transcription → summarization → Obsidian write.
 type Runner struct {
 	store       *store.Store
 	broadcast   Broadcaster
@@ -67,7 +68,20 @@ func (r *Runner) RunAfterRecording(ctx context.Context, meetingID string) {
 			log.Printf("[pipeline] Summarization skipped — ANTHROPIC_API_KEY not set")
 		}
 
-		// Future: obsidian write step (US-015)
+		// Obsidian write step
+		vaultPath, _ := r.store.GetSetting("obsidian_vault_path")
+		if vaultPath != "" {
+			r.broadcastStage(meetingID, "writing_obsidian")
+
+			if err := r.runObsidianWrite(meetingID, vaultPath); err != nil {
+				log.Printf("[pipeline] Obsidian write failed for %s: %v", meetingID, err)
+				r.broadcastStage(meetingID, "obsidian_error")
+			} else {
+				r.broadcastStage(meetingID, "obsidian_complete")
+			}
+		} else {
+			log.Printf("[pipeline] Obsidian write skipped — vault path not configured")
+		}
 
 		// Mark as done
 		r.updateMeetingStatus(meetingID, models.StatusDone)
@@ -199,6 +213,26 @@ func formatTranscript(segments []struct {
 		fmt.Fprintf(&buf, "[%d:%02d] %s: %s\n", minutes, seconds, seg.Speaker, seg.Text)
 	}
 	return buf.String()
+}
+
+func (r *Runner) runObsidianWrite(meetingID, vaultPath string) error {
+	meeting, err := r.store.GetMeeting(meetingID)
+	if err != nil {
+		return err
+	}
+
+	writer := obsidian.NewWriter(vaultPath)
+	filePath, err := writer.Write(meeting)
+	if err != nil {
+		return err
+	}
+
+	meeting.ObsidianPath = filePath
+	if err := r.store.UpdateMeeting(meeting); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (r *Runner) updateMeetingStatus(meetingID string, status models.MeetingStatus) {
