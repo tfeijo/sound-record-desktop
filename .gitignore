@@ -10,6 +10,7 @@ target/
 
 # Build
 dist/
+src-tauri/binaries/
 
 # Environment
 .env
