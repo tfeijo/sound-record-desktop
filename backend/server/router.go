@@ -35,6 +35,7 @@ func NewRouter(hub *Hub, h *Handlers) http.Handler {
 		// Meetings CRUD
 		r.Get("/meetings", h.ListMeetings)
 		r.Get("/meetings/{id}", h.GetMeeting)
+		r.Post("/meetings/{id}/regenerate", h.RegenerateSummary)
 		r.Delete("/meetings/{id}", h.DeleteMeeting)
 	})
 

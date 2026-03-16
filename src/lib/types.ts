@@ -52,6 +52,24 @@ export interface Meeting {
   updatedAt: string;
 }
 
+export interface MeetingSummary {
+  title: string;
+  summary: string;
+  decisions: string[];
+  action_items: ActionItem[];
+  topics: Topic[];
+}
+
+export interface ActionItem {
+  description: string;
+  assignee: string;
+}
+
+export interface Topic {
+  title: string;
+  summary: string;
+}
+
 export interface RecordingStartResponse {
   meetingId: string;
   status: RecordingState;

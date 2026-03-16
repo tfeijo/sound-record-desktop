@@ -90,6 +90,36 @@ func (r *Runner) RunAfterRecording(ctx context.Context, meetingID string) {
 	}()
 }
 
+// RegenerateSummary re-runs summarization for an existing meeting with a transcript.
+func (r *Runner) RegenerateSummary(ctx context.Context, meetingID string) error {
+	if !r.summarizer.Available() {
+		return fmt.Errorf("ANTHROPIC_API_KEY not set")
+	}
+
+	r.broadcastStage(meetingID, "summarizing")
+	r.updateMeetingStatus(meetingID, models.StatusSummarizing)
+
+	if err := r.runSummarization(ctx, meetingID); err != nil {
+		r.broadcastStage(meetingID, "summary_error")
+		r.updateMeetingStatus(meetingID, models.StatusDone)
+		return err
+	}
+
+	r.broadcastStage(meetingID, "summary_complete")
+
+	// Re-run Obsidian write if configured
+	vaultPath, _ := r.store.GetSetting("obsidian_vault_path")
+	if vaultPath != "" {
+		if err := r.runObsidianWrite(meetingID, vaultPath); err != nil {
+			log.Printf("[pipeline] Obsidian re-write failed for %s: %v", meetingID, err)
+		}
+	}
+
+	r.updateMeetingStatus(meetingID, models.StatusDone)
+	r.broadcastStage(meetingID, "complete")
+	return nil
+}
+
 func (r *Runner) runTranscription(ctx context.Context, meetingID string) error {
 	meeting, err := r.store.GetMeeting(meetingID)
 	if err != nil {
