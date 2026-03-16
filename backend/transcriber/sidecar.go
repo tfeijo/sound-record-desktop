@@ -28,8 +28,16 @@ func NewSidecar() *Sidecar {
 		scriptDir = abs
 	}
 
+	pythonCmd := os.Getenv("MEETNOTES_PYTHON")
+	if pythonCmd == "" {
+		pythonCmd = "python3"
+	} else if _, err := exec.LookPath(pythonCmd); err != nil {
+		log.Printf("[transcriber] MEETNOTES_PYTHON=%q not found: %v, falling back to python3", pythonCmd, err)
+		pythonCmd = "python3"
+	}
+
 	return &Sidecar{
-		PythonCmd: "python3",
+		PythonCmd: pythonCmd,
 		ScriptDir: scriptDir,
 		Timeout:   30 * time.Minute, // long meetings need time
 	}
