@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import Link from "next/link";
 import { RecordingControls } from "@/components/recording/RecordingControls";
 import { RecordingStatus } from "@/components/recording/RecordingStatus";
 import { AudioLevelMeter } from "@/components/recording/AudioLevelMeter";
@@ -43,8 +44,14 @@ export default function Home() {
 
   return (
     <main className="relative flex min-h-screen flex-col items-center bg-neutral-950 text-white">
-      {/* Status badge - top right */}
-      <div className="absolute right-4 top-4">
+      {/* Top bar */}
+      <div className="absolute right-4 top-4 flex items-center gap-3">
+        <Link
+          href="/settings"
+          className="rounded-lg px-2 py-1 text-sm text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-neutral-300"
+        >
+          Settings
+        </Link>
         <RecordingStatus isConnected={isConnected} />
       </div>
 

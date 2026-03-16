@@ -38,6 +38,10 @@ func NewRouter(hub *Hub, h *Handlers) http.Handler {
 		r.Post("/meetings/{id}/regenerate", h.RegenerateSummary)
 		r.Delete("/meetings/{id}", h.DeleteMeeting)
 
+		// Settings
+		r.Get("/settings", h.GetSettings)
+		r.Put("/settings", h.UpdateSettings)
+
 		// Meet detection
 		r.Get("/meetdetect/status", h.GetMeetDetectStatus)
 	})

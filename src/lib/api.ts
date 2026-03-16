@@ -58,6 +58,19 @@ export function deleteMeeting(id: string): Promise<void> {
   return request<void>(`/api/meetings/${id}`, { method: "DELETE" });
 }
 
+export function getSettings(): Promise<Record<string, string>> {
+  return request<Record<string, string>>("/api/settings");
+}
+
+export function updateSettings(
+  settings: Record<string, string>,
+): Promise<Record<string, string>> {
+  return request<Record<string, string>>("/api/settings", {
+    method: "PUT",
+    body: JSON.stringify(settings),
+  });
+}
+
 export function regenerateSummary(
   id: string,
 ): Promise<{ status: string }> {
