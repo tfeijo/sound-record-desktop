@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 
+use super::audio_utils::{calculate_rms_level, mix_to_mono, resample};
 use super::wav_writer::WavWriter;
 
 /// Request microphone permission from macOS via AVFoundation Objective-C runtime.
@@ -138,58 +139,6 @@ fn ensure_microphone_permission() -> Result<(), String> {
 #[cfg(not(target_os = "macos"))]
 fn ensure_microphone_permission() -> Result<(), String> {
     Ok(())
-}
-
-/// Resamples audio from `from_rate` to `to_rate` using linear interpolation.
-fn resample(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16> {
-    if from_rate == to_rate {
-        return samples.to_vec();
-    }
-    let ratio = from_rate as f64 / to_rate as f64;
-    let output_len = ((samples.len() as f64) / ratio).ceil() as usize;
-    let mut output = Vec::with_capacity(output_len);
-
-    for i in 0..output_len {
-        let src_idx = i as f64 * ratio;
-        let idx_floor = src_idx.floor() as usize;
-        let frac = src_idx - idx_floor as f64;
-
-        let s0 = samples[idx_floor] as f64;
-        let s1 = if idx_floor + 1 < samples.len() {
-            samples[idx_floor + 1] as f64
-        } else {
-            s0
-        };
-        let interpolated = s0 + frac * (s1 - s0);
-        output.push(interpolated.round() as i16);
-    }
-
-    output
-}
-
-/// Mix multi-channel interleaved samples down to mono by averaging channels.
-fn mix_to_mono(samples: &[i16], channels: u16) -> Vec<i16> {
-    if channels == 1 {
-        return samples.to_vec();
-    }
-    let ch = channels as usize;
-    samples
-        .chunks_exact(ch)
-        .map(|frame| {
-            let sum: i32 = frame.iter().map(|&s| s as i32).sum();
-            (sum / ch as i32) as i16
-        })
-        .collect()
-}
-
-/// Calculate RMS audio level normalized to 0.0-1.0.
-fn calculate_rms_level(samples: &[i16]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let sum_sq: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
-    let rms = (sum_sq / samples.len() as f64).sqrt();
-    (rms / 32767.0).min(1.0) as f32
 }
 
 /// Convert any cpal sample format buffer to i16 samples.
@@ -388,7 +337,7 @@ fn run_recording_thread(
                     let i16_samples = samples_to_i16(raw_bytes, sample_format);
 
                     // Mix to mono
-                    let mono = mix_to_mono(&i16_samples, device_channels);
+                    let mono = mix_to_mono(&i16_samples, device_channels as u32);
 
                     // Calculate level before resampling (more responsive)
                     let level = calculate_rms_level(&mono);

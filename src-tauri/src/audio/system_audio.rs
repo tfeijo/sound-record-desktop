@@ -1,7 +1,9 @@
+use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::audio_utils::{calculate_rms_level, mix_to_mono, resample};
 use super::wav_writer::WavWriter;
 
 /// SystemRecorder captures system audio (what other meeting participants say)
@@ -266,6 +268,8 @@ const K_AUDIO_FORMAT_LINEAR_PCM: u32 = 0x6C70636D; // 'lpcm'
 #[cfg(target_os = "macos")]
 const K_AUDIO_FORMAT_FLAG_IS_FLOAT: u32 = 1 << 0;
 #[cfg(target_os = "macos")]
+const K_AUDIO_FORMAT_FLAG_IS_BIG_ENDIAN: u32 = 1 << 1;
+#[cfg(target_os = "macos")]
 const K_AUDIO_FORMAT_FLAG_IS_SIGNED_INTEGER: u32 = 1 << 2;
 
 /// Ensure Screen Recording permission is granted.
@@ -305,66 +309,21 @@ struct CaptureContext {
     callback_count: u64,
 }
 
-/// Calculate RMS audio level normalized to 0.0-1.0.
-#[cfg(target_os = "macos")]
-fn calculate_rms_level(samples: &[i16]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let sum_sq: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
-    let rms = (sum_sq / samples.len() as f64).sqrt();
-    (rms / 32767.0).min(1.0) as f32
-}
-
-/// Resample audio from `from_rate` to `to_rate` using linear interpolation.
-#[cfg(target_os = "macos")]
-fn resample(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16> {
-    if from_rate == to_rate {
-        return samples.to_vec();
-    }
-    let ratio = from_rate as f64 / to_rate as f64;
-    let output_len = ((samples.len() as f64) / ratio).ceil() as usize;
-    let mut output = Vec::with_capacity(output_len);
-    for i in 0..output_len {
-        let src_idx = i as f64 * ratio;
-        let idx_floor = src_idx.floor() as usize;
-        let frac = src_idx - idx_floor as f64;
-        let s0 = samples[idx_floor] as f64;
-        let s1 = if idx_floor + 1 < samples.len() {
-            samples[idx_floor + 1] as f64
-        } else {
-            s0
-        };
-        output.push((s0 + frac * (s1 - s0)).round() as i16);
-    }
-    output
-}
-
-/// Mix multi-channel interleaved samples down to mono by averaging.
-#[cfg(target_os = "macos")]
-fn mix_to_mono(samples: &[i16], channels: u32) -> Vec<i16> {
-    if channels <= 1 {
-        return samples.to_vec();
-    }
-    let ch = channels as usize;
-    samples
-        .chunks_exact(ch)
-        .map(|frame| {
-            let sum: i32 = frame.iter().map(|&s| s as i32).sum();
-            (sum / ch as i32) as i16
-        })
-        .collect()
-}
-
 /// Convert raw audio bytes from CMSampleBuffer to i16 samples based on ASBD.
 #[cfg(target_os = "macos")]
-fn convert_audio_bytes_to_i16(
-    bytes: &[u8],
-    asbd: &AudioStreamBasicDescription,
-) -> Vec<i16> {
+fn convert_audio_bytes_to_i16(bytes: &[u8], asbd: &AudioStreamBasicDescription) -> Vec<i16> {
     let is_float = (asbd.format_flags & K_AUDIO_FORMAT_FLAG_IS_FLOAT) != 0;
     let _is_signed = (asbd.format_flags & K_AUDIO_FORMAT_FLAG_IS_SIGNED_INTEGER) != 0;
     let bits = asbd.bits_per_channel;
+
+    // I6: Check for big-endian format flag and warn
+    if (asbd.format_flags & K_AUDIO_FORMAT_FLAG_IS_BIG_ENDIAN) != 0 {
+        log::warn!(
+            "Big-endian audio format detected (flags=0x{:x}). \
+             Decoding may produce incorrect results on little-endian host.",
+            asbd.format_flags
+        );
+    }
 
     if is_float && bits == 32 {
         // Float32 samples
@@ -381,7 +340,8 @@ fn convert_audio_bytes_to_i16(
             .chunks_exact(8)
             .map(|chunk| {
                 let f = f64::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                    chunk[7],
                 ]);
                 (f.clamp(-1.0, 1.0) * 32767.0) as i16
             })
@@ -418,10 +378,50 @@ fn convert_audio_bytes_to_i16(
     }
 }
 
-/// Unique class name counter to avoid conflicts if multiple instances are created.
+/// I3: Register the delegate class only once, reusing across start/stop cycles.
 #[cfg(target_os = "macos")]
-static DELEGATE_CLASS_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+fn get_delegate_class() -> *mut c_void {
+    use std::sync::Once;
+
+    static REGISTER_ONCE: Once = Once::new();
+    static mut DELEGATE_CLS: *mut c_void = std::ptr::null_mut();
+
+    unsafe {
+        REGISTER_ONCE.call_once(|| {
+            let nsobject_cls = objc_getClass(b"NSObject\0".as_ptr() as *const c_char);
+            let cls = objc_allocateClassPair(
+                nsobject_cls,
+                b"MeetNotesSCStreamOutputDelegate\0".as_ptr() as *const c_char,
+                0,
+            );
+            assert!(!cls.is_null(), "Failed to allocate delegate class");
+
+            // Add ivar to store our CaptureContext pointer
+            class_addIvar(
+                cls,
+                b"_captureCtx\0".as_ptr() as *const c_char,
+                std::mem::size_of::<*mut c_void>(),
+                3, // log2(sizeof(pointer)) alignment
+                b"^v\0".as_ptr() as *const c_char,
+            );
+
+            // Add the stream:didOutputSampleBuffer:ofType: method
+            let sel_did_output = sel_registerName(
+                b"stream:didOutputSampleBuffer:ofType:\0".as_ptr() as *const c_char,
+            );
+            class_addMethod(
+                cls,
+                sel_did_output,
+                stream_output_handler as *const c_void,
+                b"v@:@@q\0".as_ptr() as *const c_char,
+            );
+
+            objc_registerClassPair(cls);
+            DELEGATE_CLS = cls;
+        });
+        DELEGATE_CLS
+    }
+}
 
 /// The SCStreamOutput delegate callback: `stream:didOutputSampleBuffer:ofType:`
 /// This is called by ScreenCaptureKit on its internal dispatch queue.
@@ -556,8 +556,6 @@ fn run_screencapturekit_thread(
             std::mem::transmute(objc_msgSend as *const c_void);
         let msg_send_i64: extern "C" fn(*mut c_void, *mut c_void, i64) -> *mut c_void =
             std::mem::transmute(objc_msgSend as *const c_void);
-        let _msg_send_f64: extern "C" fn(*mut c_void, *mut c_void, f64) -> *mut c_void =
-            std::mem::transmute(objc_msgSend as *const c_void);
         let msg_send_u64: extern "C" fn(*mut c_void, *mut c_void, u64) -> *mut c_void =
             std::mem::transmute(objc_msgSend as *const c_void);
         let msg_send_obj: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
@@ -569,8 +567,7 @@ fn run_screencapturekit_thread(
         // SCShareableContent.getShareableContentExcludingDesktopWindows:onScreenWindowsOnly:completionHandler:
         // We use a semaphore to make this synchronous.
 
-        let content_cls =
-            objc_getClass(b"SCShareableContent\0".as_ptr() as *const c_char);
+        let content_cls = objc_getClass(b"SCShareableContent\0".as_ptr() as *const c_char);
         if content_cls.is_null() {
             return Err("SCShareableContent class not found. macOS 12.3+ required.".to_string());
         }
@@ -593,6 +590,11 @@ fn run_screencapturekit_thread(
 
         // Build an Objective-C block for the completion handler
         // Signature: ^void(SCShareableContent *content, NSError *error)
+        //
+        // C1 FIX: Use ManuallyDrop on Arc fields to prevent use-after-free.
+        // ObjC copies blocks via memcpy without calling Arc::clone. ManuallyDrop
+        // prevents Rust from dropping the Arc when the stack block goes out of scope,
+        // since the semaphore wait guarantees the block has finished executing.
         #[repr(C)]
         struct CompletionBlock {
             isa: *const c_void,
@@ -600,8 +602,8 @@ fn run_screencapturekit_thread(
             reserved: i32,
             invoke: extern "C" fn(*mut CompletionBlock, *mut c_void, *mut c_void),
             descriptor: *const BlockDescriptor,
-            content_result: Arc<Mutex<Option<*mut c_void>>>,
-            error_result: Arc<Mutex<Option<String>>>,
+            content_result: ManuallyDrop<Arc<Mutex<Option<*mut c_void>>>>,
+            error_result: ManuallyDrop<Arc<Mutex<Option<String>>>>,
             semaphore: *mut c_void,
         }
 
@@ -611,6 +613,7 @@ fn run_screencapturekit_thread(
             size: u64,
         }
 
+        // I4 FIX: Use .lock().ok() instead of .lock().unwrap() to avoid panics across FFI.
         extern "C" fn completion_invoke(
             block: *mut CompletionBlock,
             content: *mut c_void,
@@ -627,7 +630,9 @@ fn run_screencapturekit_thread(
                         std::mem::transmute(objc_msgSend as *const c_void);
                     let desc_ns = msg(error, sel_desc);
                     let err_str = nsstring_to_rust(desc_ns);
-                    *block.error_result.lock().unwrap() = Some(err_str);
+                    if let Some(mut guard) = block.error_result.lock().ok() {
+                        *guard = Some(err_str);
+                    }
                 } else if !content.is_null() {
                     // Retain the content object so it doesn't get deallocated
                     let sel_retain =
@@ -635,7 +640,9 @@ fn run_screencapturekit_thread(
                     let msg: extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
                         std::mem::transmute(objc_msgSend as *const c_void);
                     msg(content, sel_retain);
-                    *block.content_result.lock().unwrap() = Some(content);
+                    if let Some(mut guard) = block.content_result.lock().ok() {
+                        *guard = Some(content);
+                    }
                 }
                 dispatch_semaphore_signal(block.semaphore);
             }
@@ -650,16 +657,14 @@ fn run_screencapturekit_thread(
             size: std::mem::size_of::<CompletionBlock>() as u64,
         };
 
-        // Block flag: BLOCK_HAS_COPY_DISPOSE is not needed since we use Arc (refcounted)
-        // We use stack block with captures
         let block = CompletionBlock {
             isa: &_NSConcreteStackBlock as *const _ as *const c_void,
-            flags: (1 << 25), // BLOCK_HAS_COPY_DISPOSE not needed, but mark has signature
+            flags: (1 << 25),
             reserved: 0,
             invoke: completion_invoke,
             descriptor: &descriptor,
-            content_result: content_result.clone(),
-            error_result: error_result.clone(),
+            content_result: ManuallyDrop::new(content_result.clone()),
+            error_result: ManuallyDrop::new(error_result.clone()),
             semaphore,
         };
 
@@ -695,8 +700,7 @@ fn run_screencapturekit_thread(
             .ok_or_else(|| "SCShareableContent returned null".to_string())?;
 
         // ── Step 2: Get the main display ────────────────────────────────────
-        let sel_displays =
-            sel_registerName(b"displays\0".as_ptr() as *const c_char);
+        let sel_displays = sel_registerName(b"displays\0".as_ptr() as *const c_char);
         let displays = msg_send_void(content, sel_displays);
         if displays.is_null() {
             return Err("No displays found in shareable content".to_string());
@@ -708,8 +712,7 @@ fn run_screencapturekit_thread(
             return Err("No displays available for capture".to_string());
         }
 
-        let sel_first =
-            sel_registerName(b"firstObject\0".as_ptr() as *const c_char);
+        let sel_first = sel_registerName(b"firstObject\0".as_ptr() as *const c_char);
         let display = msg_send_void(displays, sel_first);
         if display.is_null() {
             return Err("Failed to get first display".to_string());
@@ -721,21 +724,18 @@ fn run_screencapturekit_thread(
         );
 
         // ── Step 3: Get our app to exclude ──────────────────────────────────
-        let sel_apps =
-            sel_registerName(b"applications\0".as_ptr() as *const c_char);
+        let sel_apps = sel_registerName(b"applications\0".as_ptr() as *const c_char);
         let apps = msg_send_void(content, sel_apps);
 
         // Get current process ID
-        let process_info_cls =
-            objc_getClass(b"NSProcessInfo\0".as_ptr() as *const c_char);
-        let sel_process_info =
-            sel_registerName(b"processInfo\0".as_ptr() as *const c_char);
+        let process_info_cls = objc_getClass(b"NSProcessInfo\0".as_ptr() as *const c_char);
+        let sel_process_info = sel_registerName(b"processInfo\0".as_ptr() as *const c_char);
         let process_info = msg_send_void(process_info_cls, sel_process_info);
-        let sel_pid =
-            sel_registerName(b"processIdentifier\0".as_ptr() as *const c_char);
-        let our_pid: i32 = std::mem::transmute::<_, extern "C" fn(*mut c_void, *mut c_void) -> i32>(
-            objc_msgSend as *const c_void,
-        )(process_info, sel_pid);
+        let sel_pid = sel_registerName(b"processIdentifier\0".as_ptr() as *const c_char);
+        let our_pid: i32 = std::mem::transmute::<
+            _,
+            extern "C" fn(*mut c_void, *mut c_void) -> i32,
+        >(objc_msgSend as *const c_void)(process_info, sel_pid);
 
         log::info!("Our PID: {}", our_pid);
 
@@ -744,15 +744,12 @@ fn run_screencapturekit_thread(
             objc_getClass(b"NSMutableArray\0".as_ptr() as *const c_char);
         let sel_new = sel_registerName(b"new\0".as_ptr() as *const c_char);
         let excluded_apps = msg_send_void(ns_mutable_array_cls, sel_new);
-        let sel_add_object =
-            sel_registerName(b"addObject:\0".as_ptr() as *const c_char);
+        let sel_add_object = sel_registerName(b"addObject:\0".as_ptr() as *const c_char);
 
         // Iterate apps to find ours
         let app_count = msg_send_long(apps, sel_count);
-        let sel_object_at =
-            sel_registerName(b"objectAtIndex:\0".as_ptr() as *const c_char);
-        let sel_process_id =
-            sel_registerName(b"processID\0".as_ptr() as *const c_char);
+        let sel_object_at = sel_registerName(b"objectAtIndex:\0".as_ptr() as *const c_char);
+        let sel_process_id = sel_registerName(b"processID\0".as_ptr() as *const c_char);
 
         for i in 0..app_count {
             let app = msg_send_i64(apps, sel_object_at, i as i64);
@@ -762,26 +759,26 @@ fn run_screencapturekit_thread(
             >(objc_msgSend as *const c_void)(app, sel_process_id);
             if app_pid == our_pid {
                 msg_send_obj(excluded_apps, sel_add_object, app);
-                log::info!("Excluding our app (PID {}) from system audio capture", our_pid);
+                log::info!(
+                    "Excluding our app (PID {}) from system audio capture",
+                    our_pid
+                );
                 break;
             }
         }
 
         // ── Step 4: Create SCContentFilter ──────────────────────────────────
         // initWithDisplay:excludingApplications:exceptingWindows:
-        let filter_cls =
-            objc_getClass(b"SCContentFilter\0".as_ptr() as *const c_char);
+        let filter_cls = objc_getClass(b"SCContentFilter\0".as_ptr() as *const c_char);
         let sel_alloc = sel_registerName(b"alloc\0".as_ptr() as *const c_char);
         let filter_alloc = msg_send_void(filter_cls, sel_alloc);
 
         // Create empty NSArray for excepting windows
-        let ns_array_cls =
-            objc_getClass(b"NSArray\0".as_ptr() as *const c_char);
+        let ns_array_cls = objc_getClass(b"NSArray\0".as_ptr() as *const c_char);
         let empty_array = msg_send_void(ns_array_cls, sel_new);
 
         let sel_init_filter = sel_registerName(
-            b"initWithDisplay:excludingApplications:exceptingWindows:\0".as_ptr()
-                as *const c_char,
+            b"initWithDisplay:excludingApplications:exceptingWindows:\0".as_ptr() as *const c_char,
         );
         let msg_init_filter: extern "C" fn(
             *mut c_void,
@@ -789,8 +786,7 @@ fn run_screencapturekit_thread(
             *mut c_void,
             *mut c_void,
             *mut c_void,
-        ) -> *mut c_void =
-            std::mem::transmute(objc_msgSend as *const c_void);
+        ) -> *mut c_void = std::mem::transmute(objc_msgSend as *const c_void);
         let filter = msg_init_filter(
             filter_alloc,
             sel_init_filter,
@@ -824,7 +820,6 @@ fn run_screencapturekit_thread(
         // We'll resample to 16kHz ourselves for best quality
         let sel_set_sample_rate =
             sel_registerName(b"setSampleRate:\0".as_ptr() as *const c_char);
-        // SCStreamConfiguration.sampleRate is NSInteger
         msg_send_i64(config, sel_set_sample_rate, 48000);
 
         // Set channel count to 2 (stereo is typical for system audio, we mix to mono)
@@ -833,19 +828,16 @@ fn run_screencapturekit_thread(
         msg_send_i64(config, sel_set_channel_count, 2);
 
         // Minimize video overhead: set minimal resolution and frame rate
-        let sel_set_width =
-            sel_registerName(b"setWidth:\0".as_ptr() as *const c_char);
-        let sel_set_height =
-            sel_registerName(b"setHeight:\0".as_ptr() as *const c_char);
+        let sel_set_width = sel_registerName(b"setWidth:\0".as_ptr() as *const c_char);
+        let sel_set_height = sel_registerName(b"setHeight:\0".as_ptr() as *const c_char);
         msg_send_u64(config, sel_set_width, 2u64);
         msg_send_u64(config, sel_set_height, 2u64);
 
         // Set minimum frame interval to maximum (lowest framerate)
-        // CMTime(1, 1) = 1 fps
+        // CMTime(10, 1) = 0.1 fps
         let sel_set_min_frame_interval = sel_registerName(
             b"setMinimumFrameInterval:\0".as_ptr() as *const c_char,
         );
-        // CMTime is a struct { value: i64, timescale: i32, flags: u32, epoch: i64 }
         #[repr(C)]
         #[derive(Clone, Copy)]
         struct CMTime {
@@ -870,44 +862,8 @@ fn run_screencapturekit_thread(
         msg_send_bool(config, sel_set_shows_cursor, false);
 
         // ── Step 6: Create SCStreamOutput delegate ──────────────────────────
-        // We create a custom ObjC class at runtime that implements SCStreamOutput protocol
-
-        let counter = DELEGATE_CLASS_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let class_name =
-            format!("MeetNotesSCStreamOutputDelegate{}\0", counter);
-
-        let nsobject_cls =
-            objc_getClass(b"NSObject\0".as_ptr() as *const c_char);
-        let delegate_cls = objc_allocateClassPair(
-            nsobject_cls,
-            class_name.as_ptr() as *const c_char,
-            0,
-        );
-        if delegate_cls.is_null() {
-            return Err("Failed to allocate delegate class".to_string());
-        }
-
-        // Add ivar to store our CaptureContext pointer
-        class_addIvar(
-            delegate_cls,
-            b"_captureCtx\0".as_ptr() as *const c_char,
-            std::mem::size_of::<*mut c_void>(),
-            3, // log2(sizeof(pointer)) alignment
-            b"^v\0".as_ptr() as *const c_char,
-        );
-
-        // Add the stream:didOutputSampleBuffer:ofType: method
-        let sel_did_output = sel_registerName(
-            b"stream:didOutputSampleBuffer:ofType:\0".as_ptr() as *const c_char,
-        );
-        class_addMethod(
-            delegate_cls,
-            sel_did_output,
-            stream_output_handler as *const c_void,
-            b"v@:@@q\0".as_ptr() as *const c_char,
-        );
-
-        objc_registerClassPair(delegate_cls);
+        // I3: Reuse a single ObjC class registered via Once
+        let delegate_cls = get_delegate_class();
 
         // Instantiate the delegate
         let delegate = msg_send_void(delegate_cls, sel_alloc);
@@ -932,8 +888,7 @@ fn run_screencapturekit_thread(
         );
 
         // ── Step 7: Create and start SCStream ───────────────────────────────
-        let stream_cls =
-            objc_getClass(b"SCStream\0".as_ptr() as *const c_char);
+        let stream_cls = objc_getClass(b"SCStream\0".as_ptr() as *const c_char);
         let stream_alloc = msg_send_void(stream_cls, sel_alloc);
 
         let sel_init_stream = sel_registerName(
@@ -945,8 +900,7 @@ fn run_screencapturekit_thread(
             *mut c_void,
             *mut c_void,
             *mut c_void,
-        ) -> *mut c_void =
-            std::mem::transmute(objc_msgSend as *const c_void);
+        ) -> *mut c_void = std::mem::transmute(objc_msgSend as *const c_void);
         let stream = msg_init_stream(
             stream_alloc,
             sel_init_stream,
@@ -993,6 +947,7 @@ fn run_screencapturekit_thread(
         }
 
         // Start capture using completion handler
+        // C1 FIX: Use ManuallyDrop on Arc fields in StartBlock/StopBlock
         let start_sema = dispatch_semaphore_create(0);
         let start_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
@@ -1003,10 +958,11 @@ fn run_screencapturekit_thread(
             reserved: i32,
             invoke: extern "C" fn(*mut StartBlock, *mut c_void),
             descriptor: *const BlockDescriptor,
-            error_result: Arc<Mutex<Option<String>>>,
+            error_result: ManuallyDrop<Arc<Mutex<Option<String>>>>,
             semaphore: *mut c_void,
         }
 
+        // I4 FIX: Use .lock().ok() instead of .lock().unwrap()
         extern "C" fn start_invoke(block: *mut StartBlock, error: *mut c_void) {
             unsafe {
                 let block = &*block;
@@ -1018,7 +974,9 @@ fn run_screencapturekit_thread(
                         std::mem::transmute(objc_msgSend as *const c_void);
                     let desc = msg(error, sel_desc);
                     let err_str = nsstring_to_rust(desc);
-                    *block.error_result.lock().unwrap() = Some(err_str);
+                    if let Some(mut guard) = block.error_result.lock().ok() {
+                        *guard = Some(err_str);
+                    }
                 }
                 dispatch_semaphore_signal(block.semaphore);
             }
@@ -1035,7 +993,7 @@ fn run_screencapturekit_thread(
             reserved: 0,
             invoke: start_invoke,
             descriptor: &start_descriptor,
-            error_result: start_error.clone(),
+            error_result: ManuallyDrop::new(start_error.clone()),
             semaphore: start_sema,
         };
 
@@ -1071,10 +1029,11 @@ fn run_screencapturekit_thread(
             reserved: i32,
             invoke: extern "C" fn(*mut StopBlock, *mut c_void),
             descriptor: *const BlockDescriptor,
-            error_result: Arc<Mutex<Option<String>>>,
+            error_result: ManuallyDrop<Arc<Mutex<Option<String>>>>,
             semaphore: *mut c_void,
         }
 
+        // I4 FIX: Use .lock().ok() instead of .lock().unwrap()
         extern "C" fn stop_invoke(block: *mut StopBlock, error: *mut c_void) {
             unsafe {
                 let block = &*block;
@@ -1086,7 +1045,9 @@ fn run_screencapturekit_thread(
                         std::mem::transmute(objc_msgSend as *const c_void);
                     let desc = msg(error, sel_desc);
                     let err_str = nsstring_to_rust(desc);
-                    *block.error_result.lock().unwrap() = Some(err_str);
+                    if let Some(mut guard) = block.error_result.lock().ok() {
+                        *guard = Some(err_str);
+                    }
                 }
                 dispatch_semaphore_signal(block.semaphore);
             }
@@ -1103,7 +1064,7 @@ fn run_screencapturekit_thread(
             reserved: 0,
             invoke: stop_invoke,
             descriptor: &stop_descriptor,
-            error_result: stop_error.clone(),
+            error_result: ManuallyDrop::new(stop_error.clone()),
             semaphore: stop_sema,
         };
 
@@ -1122,12 +1083,44 @@ fn run_screencapturekit_thread(
 
         log::info!("ScreenCaptureKit stream stopped");
 
-        // Clean up the CaptureContext
+        // C2 FIX: Remove the stream output before freeing the context.
+        // This ensures no in-flight GCD callbacks can reference ctx_ptr after we free it.
+        let sel_remove_output = sel_registerName(
+            b"removeStreamOutput:type:\0".as_ptr() as *const c_char,
+        );
+        let msg_remove_output: extern "C" fn(*mut c_void, *mut c_void, *mut c_void, c_long) =
+            std::mem::transmute(objc_msgSend as *const c_void);
+        msg_remove_output(stream, sel_remove_output, delegate, 1); // SCStreamOutputType.audio
+
+        // Barrier: dispatch_sync on the same global queue to drain any in-flight callbacks.
+        // After this returns, no more callbacks can be running that reference ctx_ptr.
+        extern "C" {
+            fn dispatch_sync_f(
+                queue: *mut c_void,
+                context: *mut c_void,
+                work: extern "C" fn(*mut c_void),
+            );
+        }
+        extern "C" fn noop_barrier(_ctx: *mut c_void) {}
+        dispatch_sync_f(queue, std::ptr::null_mut(), noop_barrier);
+
+        // Now safe to free the CaptureContext
+        // Clear the ivar first to prevent any stale access
+        object_setInstanceVariable(
+            delegate,
+            b"_captureCtx\0".as_ptr() as *const c_char,
+            std::ptr::null_mut(),
+        );
         let _ = Box::from_raw(ctx_ptr);
 
-        // Release ObjC objects
-        let sel_release =
-            sel_registerName(b"release\0".as_ptr() as *const c_char);
+        // I2 FIX: Release all ObjC objects to prevent leaks
+        let sel_release = sel_registerName(b"release\0".as_ptr() as *const c_char);
+        msg_send_void0(stream, sel_release);
+        msg_send_void0(filter, sel_release);
+        msg_send_void0(config, sel_release);
+        msg_send_void0(delegate, sel_release);
+        msg_send_void0(excluded_apps, sel_release);
+        msg_send_void0(empty_array, sel_release);
         msg_send_void0(content, sel_release);
 
         Ok(())
@@ -1140,8 +1133,7 @@ unsafe fn nsstring_to_rust(nsstr: *mut c_void) -> String {
     if nsstr.is_null() {
         return String::from("(null)");
     }
-    let sel_utf8 =
-        sel_registerName(b"UTF8String\0".as_ptr() as *const c_char);
+    let sel_utf8 = sel_registerName(b"UTF8String\0".as_ptr() as *const c_char);
     let msg: extern "C" fn(*mut c_void, *mut c_void) -> *const c_char =
         std::mem::transmute(objc_msgSend as *const c_void);
     let cstr = msg(nsstr, sel_utf8);
