@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Rust
+target/
+
+# Build
+dist/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.sqlite
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
