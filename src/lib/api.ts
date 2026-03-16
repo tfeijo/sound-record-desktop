@@ -23,9 +23,18 @@ export function startRecording(): Promise<RecordingStartResponse> {
   });
 }
 
-export function stopRecording(): Promise<RecordingStopResponse> {
+export interface StopRecordingBody {
+  micPath?: string;
+  systemPath?: string;
+  duration?: number;
+}
+
+export function stopRecording(
+  body?: StopRecordingBody,
+): Promise<RecordingStopResponse> {
   return request<RecordingStopResponse>("/api/recording/stop", {
     method: "POST",
+    body: body ? JSON.stringify(body) : undefined,
   });
 }
 

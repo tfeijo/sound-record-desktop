@@ -18,6 +18,7 @@ import (
 // Handlers holds dependencies for HTTP handler methods.
 type Handlers struct {
 	Store *store.Store
+	Hub   *Hub
 
 	mu        sync.RWMutex
 	state     string // idle, recording, processing, done, error
@@ -25,9 +26,10 @@ type Handlers struct {
 }
 
 // NewHandlers creates a Handlers with default recording state.
-func NewHandlers(s *store.Store) *Handlers {
+func NewHandlers(s *store.Store, hub *Hub) *Handlers {
 	return &Handlers{
 		Store: s,
+		Hub:   hub,
 		state: "idle",
 	}
 }
@@ -71,10 +73,25 @@ func (h *Handlers) StartRecording(w http.ResponseWriter, r *http.Request) {
 	h.state = "recording"
 	h.meetingID = meetingID
 
+	// Broadcast recording started via WebSocket
+	h.Hub.Broadcast(Message{
+		Type: "recording:started",
+		Payload: map[string]string{
+			"meetingId": meetingID,
+		},
+	})
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"meetingId": meetingID,
 		"status":    "recording",
 	})
+}
+
+// stopRecordingRequest is the expected JSON body for POST /api/recording/stop.
+type stopRecordingRequest struct {
+	MicPath    string `json:"micPath"`
+	SystemPath string `json:"systemPath"`
+	Duration   int    `json:"duration"` // seconds
 }
 
 // StopRecording handles POST /api/recording/stop.
@@ -82,20 +99,38 @@ func (h *Handlers) StopRecording(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	// Parse optional body with file paths from Tauri
+	var body stopRecordingRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+
 	if h.meetingID != "" {
 		meeting, err := h.Store.GetMeeting(h.meetingID)
 		if err == nil {
 			now := time.Now().UTC()
 			meeting.EndTime = &now
-			if meeting.StartTime != nil {
+			if body.Duration > 0 {
+				meeting.DurationSeconds = body.Duration
+			} else if meeting.StartTime != nil {
 				meeting.DurationSeconds = int(now.Sub(*meeting.StartTime).Seconds())
 			}
+			meeting.MicPath = body.MicPath
+			meeting.SystemPath = body.SystemPath
 			meeting.Status = models.StatusDone
 			if err := h.Store.UpdateMeeting(meeting); err != nil {
 				log.Printf("Error updating meeting on stop: %v", err)
 			}
 		}
 	}
+
+	// Broadcast recording stopped via WebSocket
+	h.Hub.Broadcast(Message{
+		Type: "recording:stopped",
+		Payload: map[string]string{
+			"meetingId": h.meetingID,
+		},
+	})
 
 	h.state = "idle"
 	h.meetingID = ""

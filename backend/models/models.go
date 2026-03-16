@@ -24,6 +24,8 @@ type Meeting struct {
 	SpeakerCount    int           `json:"speakerCount"`
 	Status          MeetingStatus `json:"status"`
 	AudioPath       string        `json:"audioPath,omitempty"`
+	MicPath         string        `json:"micPath,omitempty"`
+	SystemPath      string        `json:"systemPath,omitempty"`
 	TranscriptJSON  string        `json:"transcriptJson,omitempty"`
 	SummaryJSON     string        `json:"summaryJson,omitempty"`
 	ObsidianPath    string        `json:"obsidianPath,omitempty"`

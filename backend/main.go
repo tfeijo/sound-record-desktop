@@ -41,7 +41,7 @@ func main() {
 	hub := server.NewHub()
 	go hub.Run(ctx)
 
-	handlers := server.NewHandlers(db)
+	handlers := server.NewHandlers(db, hub)
 	router := server.NewRouter(hub, handlers)
 
 	srv := &http.Server{
