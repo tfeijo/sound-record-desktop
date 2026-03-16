@@ -17,6 +17,9 @@ tauri-plugin-notification = "2"
 tauri-plugin-log = "2"
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["time"] }
+cpal = "0.15"
+hound = "3.5"
+dirs = "5"
 
 [lib]
 name = "meetnotes_lib"
