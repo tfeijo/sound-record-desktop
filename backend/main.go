@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tfeijo/sound-record-desktop/backend/server"
+	"github.com/tfeijo/sound-record-desktop/backend/store"
 )
 
 const defaultPort = "9876"
@@ -23,10 +24,25 @@ func main() {
 		port = defaultPort
 	}
 
+	// Initialize SQLite store.
+	dbPath := os.Getenv("MEETNOTES_DB_PATH")
+	if dbPath == "" {
+		dbPath = store.DefaultDBPath()
+	}
+
+	db, err := store.NewStore(dbPath)
+	if err != nil {
+		log.Fatalf("Failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	log.Printf("Database opened at %s", dbPath)
+
 	hub := server.NewHub()
 	go hub.Run(ctx)
 
-	router := server.NewRouter(hub)
+	handlers := server.NewHandlers(db)
+	router := server.NewRouter(hub, handlers)
 
 	srv := &http.Server{
 		Addr:        ":" + port,

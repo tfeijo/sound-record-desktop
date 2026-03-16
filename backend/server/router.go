@@ -9,14 +9,14 @@ import (
 )
 
 // NewRouter creates and configures the chi router with all routes and middleware.
-func NewRouter(hub *Hub) http.Handler {
+func NewRouter(hub *Hub, h *Handlers) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
 	// Health check
-	r.Get("/health", HealthCheck)
+	r.Get("/health", h.HealthCheck)
 
 	// WebSocket endpoint
 	r.Get("/ws", hub.HandleWebSocket)
@@ -28,9 +28,14 @@ func NewRouter(hub *Hub) http.Handler {
 		})
 
 		// Recording endpoints
-		r.Post("/recording/start", StartRecording)
-		r.Post("/recording/stop", StopRecording)
-		r.Get("/recording/status", GetRecordingStatus)
+		r.Post("/recording/start", h.StartRecording)
+		r.Post("/recording/stop", h.StopRecording)
+		r.Get("/recording/status", h.GetRecordingStatus)
+
+		// Meetings CRUD
+		r.Get("/meetings", h.ListMeetings)
+		r.Get("/meetings/{id}", h.GetMeeting)
+		r.Delete("/meetings/{id}", h.DeleteMeeting)
 	})
 
 	// Wrap with CORS for local development
