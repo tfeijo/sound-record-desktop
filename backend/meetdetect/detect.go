@@ -75,46 +75,61 @@ func (d *Detector) CurrentURL() string {
 	return d.currentURL
 }
 
-var meetURLPattern = regexp.MustCompile(`https://meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}`)
+var meetURLPattern = regexp.MustCompile(`(?i)https://meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}`)
+
+type transition int
+
+const (
+	transitionNone     transition = iota
+	transitionDetected            // not-in-meeting → in-meeting
+	transitionEnded               // in-meeting → not-in-meeting
+)
 
 func (d *Detector) poll() {
 	url := detectMeetURL()
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	// Determine transition under the lock, then invoke callbacks outside
+	var trans transition
+	var transURL string
 
+	d.mu.Lock()
 	if url != "" {
 		d.missCount = 0
 		if !d.inMeeting {
-			// Transition: not-in-meeting → in-meeting
 			d.inMeeting = true
 			d.currentURL = url
-			log.Printf("[meetdetect] Google Meet detected: %s", url)
-			d.broadcaster.BroadcastJSON("meet:detected", map[string]string{
-				"url": url,
-			})
-			if d.callback.OnMeetDetected != nil {
-				d.callback.OnMeetDetected(url)
-			}
+			trans = transitionDetected
+			transURL = url
 		} else if url != d.currentURL {
-			// URL changed (switched meetings)
 			d.currentURL = url
 			log.Printf("[meetdetect] Meet URL changed: %s", url)
 		}
-	} else {
-		if d.inMeeting {
-			d.missCount++
-			if d.missCount >= d.debounceCount {
-				// Transition: in-meeting → not-in-meeting (debounced)
-				log.Printf("[meetdetect] Google Meet ended (debounced after %d misses)", d.missCount)
-				d.inMeeting = false
-				d.currentURL = ""
-				d.missCount = 0
-				d.broadcaster.BroadcastJSON("meet:ended", map[string]string{})
-				if d.callback.OnMeetEnded != nil {
-					d.callback.OnMeetEnded()
-				}
-			}
+	} else if d.inMeeting {
+		d.missCount++
+		if d.missCount >= d.debounceCount {
+			d.inMeeting = false
+			d.currentURL = ""
+			d.missCount = 0
+			trans = transitionEnded
+		}
+	}
+	d.mu.Unlock()
+
+	// Fire callbacks outside the lock to prevent deadlocks
+	switch trans {
+	case transitionDetected:
+		log.Printf("[meetdetect] Google Meet detected: %s", transURL)
+		d.broadcaster.BroadcastJSON("meet:detected", map[string]string{
+			"url": transURL,
+		})
+		if d.callback.OnMeetDetected != nil {
+			d.callback.OnMeetDetected(transURL)
+		}
+	case transitionEnded:
+		log.Printf("[meetdetect] Google Meet ended (debounced)")
+		d.broadcaster.BroadcastJSON("meet:ended", map[string]string{})
+		if d.callback.OnMeetEnded != nil {
+			d.callback.OnMeetEnded()
 		}
 	}
 }
@@ -145,7 +160,9 @@ func detectMeetURL() string {
 }
 
 func runAppleScript(script string) string {
-	cmd := exec.Command("osascript", "-e", script)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "osascript", "-e", script)
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -161,7 +178,6 @@ tell application "System Events"
 	if not (exists process "Google Chrome") then return ""
 end tell
 tell application "Google Chrome"
-	set urlList to ""
 	repeat with w in windows
 		repeat with t in tabs of w
 			set tabURL to URL of t
@@ -179,7 +195,6 @@ tell application "System Events"
 	if not (exists process "Arc") then return ""
 end tell
 tell application "Arc"
-	set urlList to ""
 	repeat with w in windows
 		repeat with t in tabs of w
 			set tabURL to URL of t

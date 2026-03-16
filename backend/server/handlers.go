@@ -314,7 +314,19 @@ func (h *Handlers) AutoStartRecording(meetURL string) {
 }
 
 // AutoStopRecording is called by the Meet detector when a meeting ends.
+// Only stops if the current recording was auto-started (has a meetURL).
 func (h *Handlers) AutoStopRecording() {
+	h.mu.RLock()
+	isAutoRecording := h.meetURL != "" && h.state == "recording"
+	h.mu.RUnlock()
+
+	if !isAutoRecording {
+		log.Printf("[meetdetect] Not auto-stopping — recording is manual or not active")
+		return
+	}
+
+	// Note: stopRecordingLocked receives empty paths because Tauri/Rust manages
+	// audio file paths. It will update the meeting via the Tauri stop flow.
 	meetingID, hasAudio := h.stopRecordingLocked(stopRecordingRequest{})
 
 	if meetingID != "" && hasAudio {
