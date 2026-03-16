@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"log"
@@ -12,13 +13,15 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/tfeijo/sound-record-desktop/backend/models"
+	"github.com/tfeijo/sound-record-desktop/backend/pipeline"
 	"github.com/tfeijo/sound-record-desktop/backend/store"
 )
 
 // Handlers holds dependencies for HTTP handler methods.
 type Handlers struct {
-	Store *store.Store
-	Hub   *Hub
+	Store    *store.Store
+	Hub      *Hub
+	Pipeline *pipeline.Runner
 
 	mu        sync.RWMutex
 	state     string // idle, recording, processing, done, error
@@ -28,9 +31,10 @@ type Handlers struct {
 // NewHandlers creates a Handlers with default recording state.
 func NewHandlers(s *store.Store, hub *Hub) *Handlers {
 	return &Handlers{
-		Store: s,
-		Hub:   hub,
-		state: "idle",
+		Store:    s,
+		Hub:      hub,
+		Pipeline: pipeline.NewRunner(s, hub),
+		state:    "idle",
 	}
 }
 
@@ -97,7 +101,6 @@ type stopRecordingRequest struct {
 // StopRecording handles POST /api/recording/stop.
 func (h *Handlers) StopRecording(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 
 	// Parse optional body with file paths from Tauri
 	var body stopRecordingRequest
@@ -105,8 +108,11 @@ func (h *Handlers) StopRecording(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 
-	if h.meetingID != "" {
-		meeting, err := h.Store.GetMeeting(h.meetingID)
+	meetingID := h.meetingID
+	hasAudio := body.MicPath != "" || body.SystemPath != ""
+
+	if meetingID != "" {
+		meeting, err := h.Store.GetMeeting(meetingID)
 		if err == nil {
 			now := time.Now().UTC()
 			meeting.EndTime = &now
@@ -117,7 +123,12 @@ func (h *Handlers) StopRecording(w http.ResponseWriter, r *http.Request) {
 			}
 			meeting.MicPath = body.MicPath
 			meeting.SystemPath = body.SystemPath
-			meeting.Status = models.StatusDone
+			// Set to processing if we have audio to transcribe, otherwise done
+			if hasAudio {
+				meeting.Status = models.StatusTranscribing
+			} else {
+				meeting.Status = models.StatusDone
+			}
 			if err := h.Store.UpdateMeeting(meeting); err != nil {
 				log.Printf("Error updating meeting on stop: %v", err)
 			}
@@ -128,12 +139,18 @@ func (h *Handlers) StopRecording(w http.ResponseWriter, r *http.Request) {
 	h.Hub.Broadcast(Message{
 		Type: "recording:stopped",
 		Payload: map[string]string{
-			"meetingId": h.meetingID,
+			"meetingId": meetingID,
 		},
 	})
 
 	h.state = "idle"
 	h.meetingID = ""
+	h.mu.Unlock()
+
+	// Trigger transcription pipeline in background
+	if meetingID != "" && hasAudio {
+		h.Pipeline.RunAfterRecording(context.Background(), meetingID)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status": "idle",

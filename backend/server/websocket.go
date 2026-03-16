@@ -143,6 +143,11 @@ func (h *Hub) Broadcast(msg Message) {
 	}
 }
 
+// BroadcastJSON sends a typed message with a JSON payload to all connected clients.
+func (h *Hub) BroadcastJSON(msgType string, payload interface{}) {
+	h.Broadcast(Message{Type: msgType, Payload: payload})
+}
+
 // HandleWebSocket upgrades the HTTP connection to a WebSocket connection.
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
