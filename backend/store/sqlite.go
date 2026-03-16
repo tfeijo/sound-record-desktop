@@ -260,6 +260,91 @@ func (s *Store) GetAllSettings() (map[string]string, error) {
 	return settings, rows.Err()
 }
 
+// --- Speaker Profiles ---
+
+// CreateSpeakerProfile inserts a new speaker profile.
+func (s *Store) CreateSpeakerProfile(p *models.SpeakerProfile) error {
+	p.CreatedAt = time.Now().UTC()
+	_, err := s.db.Exec(`
+		INSERT INTO speaker_profiles (id, name, embedding_path, created_at)
+		VALUES (?, ?, ?, ?)`,
+		p.ID, p.Name, p.EmbeddingPath, p.CreatedAt.Format(time.RFC3339),
+	)
+	return err
+}
+
+// GetSpeakerProfile returns a speaker profile by ID.
+func (s *Store) GetSpeakerProfile(id string) (*models.SpeakerProfile, error) {
+	var p models.SpeakerProfile
+	var createdAt string
+	err := s.db.QueryRow(`
+		SELECT id, name, embedding_path, created_at
+		FROM speaker_profiles WHERE id = ?`, id).Scan(
+		&p.ID, &p.Name, &p.EmbeddingPath, &createdAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+		p.CreatedAt = t
+	}
+	return &p, nil
+}
+
+// ListSpeakerProfiles returns all speaker profiles ordered by name.
+func (s *Store) ListSpeakerProfiles() ([]models.SpeakerProfile, error) {
+	rows, err := s.db.Query(`
+		SELECT id, name, embedding_path, created_at
+		FROM speaker_profiles ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var profiles []models.SpeakerProfile
+	for rows.Next() {
+		var p models.SpeakerProfile
+		var createdAt string
+		if err := rows.Scan(&p.ID, &p.Name, &p.EmbeddingPath, &createdAt); err != nil {
+			return nil, err
+		}
+		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+			p.CreatedAt = t
+		}
+		profiles = append(profiles, p)
+	}
+	return profiles, rows.Err()
+}
+
+// UpdateSpeakerProfile updates the name and embedding path of a speaker profile.
+func (s *Store) UpdateSpeakerProfile(p *models.SpeakerProfile) error {
+	result, err := s.db.Exec(`
+		UPDATE speaker_profiles SET name = ?, embedding_path = ? WHERE id = ?`,
+		p.Name, p.EmbeddingPath, p.ID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// DeleteSpeakerProfile removes a speaker profile by ID.
+func (s *Store) DeleteSpeakerProfile(id string) error {
+	result, err := s.db.Exec("DELETE FROM speaker_profiles WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // --- Helpers ---
 
 // scanner is an interface satisfied by both *sql.Row and *sql.Rows.

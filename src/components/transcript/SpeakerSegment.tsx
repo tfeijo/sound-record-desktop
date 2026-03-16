@@ -1,6 +1,7 @@
 import type { TranscriptSegment } from "@/lib/types";
+import { SpeakerLabel } from "./SpeakerLabel";
 
-const COLOR_PALETTE = [
+export const COLOR_PALETTE = [
   "text-blue-400",
   "text-emerald-400",
   "text-amber-400",
@@ -11,7 +12,7 @@ const COLOR_PALETTE = [
   "text-pink-400",
 ];
 
-function getSpeakerColor(speaker: string, speakerList: string[]): string {
+export function getSpeakerColor(speaker: string, speakerList: string[]): string {
   const idx = speakerList.indexOf(speaker);
   return COLOR_PALETTE[(idx >= 0 ? idx : 0) % COLOR_PALETTE.length];
 }
@@ -25,17 +26,35 @@ function formatTimestamp(seconds: number): string {
 interface SpeakerSegmentProps {
   segment: TranscriptSegment;
   speakerList: string[];
+  meetingId?: string;
+  onSpeakerRenamed?: (oldName: string, newName: string) => void;
 }
 
-export function SpeakerSegment({ segment, speakerList }: SpeakerSegmentProps) {
+export function SpeakerSegment({
+  segment,
+  speakerList,
+  meetingId,
+  onSpeakerRenamed,
+}: SpeakerSegmentProps) {
   const color = getSpeakerColor(segment.speaker, speakerList);
 
   return (
     <div className="flex gap-3 py-2 border-b border-neutral-800 last:border-0">
       <div className="flex flex-col items-end min-w-[80px] pt-0.5">
-        <span className={`text-sm font-medium ${color}`}>
-          {segment.speaker}
-        </span>
+        {meetingId && onSpeakerRenamed ? (
+          <SpeakerLabel
+            speaker={segment.speaker}
+            meetingId={meetingId}
+            start={segment.start}
+            end={segment.end}
+            color={color}
+            onRenamed={onSpeakerRenamed}
+          />
+        ) : (
+          <span className={`text-sm font-medium ${color}`}>
+            {segment.speaker}
+          </span>
+        )}
         <span className="text-xs text-neutral-500">
           {formatTimestamp(segment.start)}
         </span>

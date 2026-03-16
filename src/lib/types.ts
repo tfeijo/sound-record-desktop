@@ -70,6 +70,13 @@ export interface Topic {
   summary: string;
 }
 
+export interface SpeakerProfile {
+  id: string;
+  name: string;
+  embeddingPath?: string;
+  createdAt: string;
+}
+
 export interface RecordingStartResponse {
   meetingId: string;
   status: RecordingState;

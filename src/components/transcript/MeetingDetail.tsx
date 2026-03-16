@@ -248,7 +248,10 @@ export function MeetingDetail({ meetingId }: MeetingDetailProps) {
             )}
 
             {activeTab === "transcript" && transcript && (
-              <TranscriptViewer transcript={transcript} />
+              <TranscriptViewer
+                transcript={transcript}
+                meetingId={meetingId}
+              />
             )}
           </>
         )}

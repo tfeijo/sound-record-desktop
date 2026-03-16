@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { TranscriptionResult } from "@/lib/types";
 import { SpeakerSegment } from "./SpeakerSegment";
 
@@ -11,12 +11,39 @@ function formatSpeakerDuration(seconds: number): string {
 
 interface TranscriptViewerProps {
   transcript: TranscriptionResult;
+  meetingId?: string;
+  onTranscriptUpdate?: (updated: TranscriptionResult) => void;
 }
 
-export function TranscriptViewer({ transcript }: TranscriptViewerProps) {
+export function TranscriptViewer({
+  transcript: initialTranscript,
+  meetingId,
+  onTranscriptUpdate,
+}: TranscriptViewerProps) {
+  const [transcript, setTranscript] = useState(initialTranscript);
+
   const speakerList = useMemo(
     () => transcript.speakers.map((s) => s.id),
     [transcript.speakers],
+  );
+
+  const handleSpeakerRenamed = useCallback(
+    (oldName: string, newName: string) => {
+      setTranscript((prev) => {
+        const updated = {
+          ...prev,
+          segments: prev.segments.map((seg) =>
+            seg.speaker === oldName ? { ...seg, speaker: newName } : seg,
+          ),
+          speakers: prev.speakers.map((sp) =>
+            sp.id === oldName ? { ...sp, id: newName } : sp,
+          ),
+        };
+        onTranscriptUpdate?.(updated);
+        return updated;
+      });
+    },
+    [onTranscriptUpdate],
   );
 
   if (transcript.segments.length === 0) {
@@ -58,6 +85,13 @@ export function TranscriptViewer({ transcript }: TranscriptViewerProps) {
         </div>
       )}
 
+      {/* Rename hint */}
+      {meetingId && speakerList.some((s) => /^(Speaker|Participant) \d+$/.test(s)) && (
+        <p className="text-xs text-neutral-500">
+          Click on a speaker name to assign a real name and save for future meetings.
+        </p>
+      )}
+
       {/* Segments */}
       <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4 max-h-[60vh] overflow-y-auto">
         {transcript.segments.map((segment) => (
@@ -65,6 +99,8 @@ export function TranscriptViewer({ transcript }: TranscriptViewerProps) {
             key={`${segment.speaker}-${segment.start}`}
             segment={segment}
             speakerList={speakerList}
+            meetingId={meetingId}
+            onSpeakerRenamed={handleSpeakerRenamed}
           />
         ))}
       </div>
