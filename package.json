@@ -12,22 +12,22 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.5.0",
     "next": "^16.1.6",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "@tauri-apps/api": "^2.5.0"
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.5.0",
     "@tailwindcss/postcss": "^4.1.0",
-    "tailwindcss": "^4.1.0",
-    "typescript": "^5.9.3",
+    "@tauri-apps/cli": "^2.5.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "eslint": "^9.0.0",
     "eslint-config-next": "^16.1.6",
-    "postcss": "^8.5.0"
+    "postcss": "^8.5.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.9.3"
   },
   "packageManager": "pnpm@10.6.5"
 }
