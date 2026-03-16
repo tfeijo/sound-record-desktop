@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -25,7 +24,7 @@ func main() {
 	}
 
 	hub := server.NewHub()
-	go hub.Run()
+	go hub.Run(ctx)
 
 	router := server.NewRouter(hub)
 
@@ -34,6 +33,7 @@ func main() {
 		Handler:     router,
 		ReadTimeout: 15 * time.Second,
 		IdleTimeout: 60 * time.Second,
+		// WriteTimeout intentionally omitted — it would kill long-lived WebSocket connections.
 	}
 
 	go func() {
@@ -53,5 +53,5 @@ func main() {
 		log.Printf("Server shutdown error: %v", err)
 	}
 
-	fmt.Println("Server stopped")
+	log.Println("Server stopped")
 }

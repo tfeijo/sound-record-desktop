@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -13,6 +14,9 @@ import (
 const (
 	// Send buffer size per client.
 	clientSendBufferSize = 256
+
+	// Maximum incoming message size (bytes). Prevents memory exhaustion from large payloads.
+	maxMessageSize = 4096
 
 	// Time allowed to write a message to the client.
 	writeWait = 10 * time.Second
@@ -70,9 +74,22 @@ func NewHub() *Hub {
 }
 
 // Run starts the hub event loop. Should be called in a goroutine.
-func (h *Hub) Run() {
+// It exits when ctx is cancelled, closing all client connections.
+func (h *Hub) Run(ctx context.Context) {
 	for {
 		select {
+		case <-ctx.Done():
+			h.mu.Lock()
+			for client := range h.clients {
+				client.closeOnce.Do(func() {
+					close(client.send)
+				})
+				delete(h.clients, client)
+			}
+			h.mu.Unlock()
+			log.Println("WebSocket hub stopped")
+			return
+
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client] = true
@@ -182,6 +199,7 @@ func (c *Client) readPump() {
 		c.conn.Close()
 	}()
 
+	c.conn.SetReadLimit(maxMessageSize)
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error {
 		c.conn.SetReadDeadline(time.Now().Add(pongWait))
