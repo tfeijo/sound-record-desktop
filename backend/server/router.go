@@ -37,6 +37,9 @@ func NewRouter(hub *Hub, h *Handlers) http.Handler {
 		r.Get("/meetings/{id}", h.GetMeeting)
 		r.Post("/meetings/{id}/regenerate", h.RegenerateSummary)
 		r.Delete("/meetings/{id}", h.DeleteMeeting)
+
+		// Meet detection
+		r.Get("/meetdetect/status", h.GetMeetDetectStatus)
 	})
 
 	// Wrap with CORS for local development
