@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { SettingsForm } from "@/components/settings/SettingsForm";
+import { SpeakerManager } from "@/components/transcript/SpeakerManager";
 
 export default function SettingsPage() {
   return (
@@ -15,6 +16,17 @@ export default function SettingsPage() {
         </Link>
         <h1 className="mb-8 text-2xl font-bold">Settings</h1>
         <SettingsForm />
+
+        <hr className="my-8 border-neutral-800" />
+
+        <h2 className="mb-4 text-lg font-semibold text-neutral-300">
+          Speaker Profiles
+        </h2>
+        <p className="mb-4 text-xs text-neutral-500">
+          Manage known speakers. Assign names to speakers in transcripts to save
+          their voice profile for automatic identification in future meetings.
+        </p>
+        <SpeakerManager />
       </div>
     </main>
   );

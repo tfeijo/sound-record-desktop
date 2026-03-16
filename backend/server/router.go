@@ -42,6 +42,14 @@ func NewRouter(hub *Hub, h *Handlers) http.Handler {
 		r.Get("/settings", h.GetSettings)
 		r.Put("/settings", h.UpdateSettings)
 
+		// Speaker profiles
+		r.Get("/speakers", h.ListSpeakers)
+		r.Post("/speakers", h.CreateSpeaker)
+		r.Post("/speakers/enroll", h.EnrollSpeaker)
+		r.Get("/speakers/{id}", h.GetSpeaker)
+		r.Put("/speakers/{id}", h.UpdateSpeaker)
+		r.Delete("/speakers/{id}", h.DeleteSpeaker)
+
 		// Meet detection
 		r.Get("/meetdetect/status", h.GetMeetDetectStatus)
 	})

@@ -152,12 +152,19 @@ func (r *Runner) runTranscription(ctx context.Context, meetingID string) error {
 
 	language, _ := r.store.GetSetting("language")
 
+	// Load known speaker names for identification
+	profiles, _ := r.store.ListSpeakerProfiles()
+	knownSpeakers := make([]string, 0, len(profiles))
+	for _, p := range profiles {
+		knownSpeakers = append(knownSpeakers, p.Name)
+	}
+
 	req := &transcriber.TranscriptionRequest{
 		AudioPaths:    audioPaths,
 		UserName:      userName,
 		Language:      language,
 		ModelSize:     modelSize,
-		KnownSpeakers: []string{},
+		KnownSpeakers: knownSpeakers,
 	}
 
 	resp, err := r.transcriber.Transcribe(ctx, req)

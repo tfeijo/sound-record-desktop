@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { getMeeting, regenerateSummary } from "@/lib/api";
 import { TranscriptViewer } from "./TranscriptViewer";
@@ -47,6 +47,7 @@ export function MeetingDetail({ meetingId }: MeetingDetailProps) {
   const [loading, setLoading] = useState(true);
   const [regenerating, setRegenerating] = useState(false);
   const [activeTab, setActiveTab] = useState<Tab>("summary");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadMeeting = useCallback(async () => {
     try {
@@ -97,6 +98,13 @@ export function MeetingDetail({ meetingId }: MeetingDetailProps) {
     }
   }, [loading, summary, transcript]);
 
+  // Cleanup polling interval on unmount
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+
   const handleRegenerate = async () => {
     if (regenerating) return;
     setRegenerating(true);
@@ -106,12 +114,13 @@ export function MeetingDetail({ meetingId }: MeetingDetailProps) {
       // Poll until meeting status returns to "done" (or error/timeout)
       const maxAttempts = 30; // ~60 seconds max
       let attempts = 0;
-      const poll = setInterval(async () => {
+      pollRef.current = setInterval(async () => {
         attempts++;
         try {
           const m = await getMeeting(meetingId);
           if (m.status === "done" || m.status === "error" || attempts >= maxAttempts) {
-            clearInterval(poll);
+            if (pollRef.current) clearInterval(pollRef.current);
+            pollRef.current = null;
             await loadMeeting();
             setRegenerating(false);
             if (m.summaryJson) {
@@ -119,7 +128,8 @@ export function MeetingDetail({ meetingId }: MeetingDetailProps) {
             }
           }
         } catch {
-          clearInterval(poll);
+          if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = null;
           setRegenerating(false);
         }
       }, 2000);
@@ -248,7 +258,11 @@ export function MeetingDetail({ meetingId }: MeetingDetailProps) {
             )}
 
             {activeTab === "transcript" && transcript && (
-              <TranscriptViewer transcript={transcript} />
+              <TranscriptViewer
+                transcript={transcript}
+                meetingId={meetingId}
+                onTranscriptUpdate={setTranscript}
+              />
             )}
           </>
         )}

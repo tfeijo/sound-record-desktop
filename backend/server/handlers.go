@@ -397,6 +397,250 @@ func (h *Handlers) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, settings)
 }
 
+// --- Speaker Profile Handlers ---
+
+// ListSpeakers handles GET /api/speakers.
+func (h *Handlers) ListSpeakers(w http.ResponseWriter, r *http.Request) {
+	profiles, err := h.Store.ListSpeakerProfiles()
+	if err != nil {
+		log.Printf("Error listing speakers: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list speakers"})
+		return
+	}
+	if profiles == nil {
+		profiles = []models.SpeakerProfile{}
+	}
+	writeJSON(w, http.StatusOK, profiles)
+}
+
+// GetSpeaker handles GET /api/speakers/{id}.
+func (h *Handlers) GetSpeaker(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	profile, err := h.Store.GetSpeakerProfile(id)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "speaker not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to get speaker"})
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+// createSpeakerRequest is the JSON body for POST /api/speakers.
+type createSpeakerRequest struct {
+	Name string `json:"name"`
+}
+
+// CreateSpeaker handles POST /api/speakers.
+func (h *Handlers) CreateSpeaker(w http.ResponseWriter, r *http.Request) {
+	var body createSpeakerRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if body.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		return
+	}
+	if len(body.Name) > 100 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name too long (max 100 chars)"})
+		return
+	}
+
+	profile := &models.SpeakerProfile{
+		ID:   uuid.New().String(),
+		Name: body.Name,
+	}
+	if err := h.Store.CreateSpeakerProfile(profile); err != nil {
+		log.Printf("Error creating speaker: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create speaker"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, profile)
+}
+
+// updateSpeakerRequest is the JSON body for PUT /api/speakers/{id}.
+type updateSpeakerRequest struct {
+	Name string `json:"name"`
+}
+
+// UpdateSpeaker handles PUT /api/speakers/{id}.
+func (h *Handlers) UpdateSpeaker(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	profile, err := h.Store.GetSpeakerProfile(id)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "speaker not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to get speaker"})
+		return
+	}
+
+	var body updateSpeakerRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if body.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		return
+	}
+	if len(body.Name) > 100 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name too long (max 100 chars)"})
+		return
+	}
+
+	profile.Name = body.Name
+	if err := h.Store.UpdateSpeakerProfile(profile); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update speaker"})
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+// DeleteSpeaker handles DELETE /api/speakers/{id}.
+func (h *Handlers) DeleteSpeaker(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	err := h.Store.DeleteSpeakerProfile(id)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "speaker not found"})
+		return
+	}
+	if err != nil {
+		log.Printf("Error deleting speaker: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to delete speaker"})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+// enrollSpeakerRequest is the JSON body for POST /api/speakers/enroll.
+type enrollSpeakerRequest struct {
+	MeetingID string `json:"meetingId"`
+	Speaker   string `json:"speaker"`    // current speaker label (e.g. "Speaker 1")
+	Name      string `json:"name"`       // name to assign
+	Start     float64 `json:"start"`     // segment start time for embedding extraction
+	End       float64 `json:"end"`       // segment end time
+}
+
+// EnrollSpeaker handles POST /api/speakers/enroll.
+// Creates or updates a speaker profile and extracts a voice embedding from meeting audio.
+func (h *Handlers) EnrollSpeaker(w http.ResponseWriter, r *http.Request) {
+	var body enrollSpeakerRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if body.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		return
+	}
+	if len(body.Name) > 100 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name too long (max 100 chars)"})
+		return
+	}
+	if body.MeetingID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "meetingId is required"})
+		return
+	}
+
+	// Look up meeting to get audio path
+	meeting, err := h.Store.GetMeeting(body.MeetingID)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "meeting not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to get meeting"})
+		return
+	}
+
+	// Determine audio source — system audio for non-user speakers, mic for user
+	audioPath := meeting.SystemPath
+	if audioPath == "" {
+		audioPath = meeting.MicPath
+	}
+
+	// Create speaker profile (embedding path will be set later by the ML sidecar if available)
+	profile := &models.SpeakerProfile{
+		ID:   uuid.New().String(),
+		Name: body.Name,
+	}
+	if err := h.Store.CreateSpeakerProfile(profile); err != nil {
+		log.Printf("Error creating speaker profile: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create speaker"})
+		return
+	}
+
+	// Update transcript to rename the speaker
+	if meeting.TranscriptJSON != "" {
+		updated := renameSpeakerInTranscript(meeting.TranscriptJSON, body.Speaker, body.Name)
+		if updated != meeting.TranscriptJSON {
+			meeting.TranscriptJSON = updated
+			if err := h.Store.UpdateMeeting(meeting); err != nil {
+				log.Printf("Error updating meeting transcript: %v", err)
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"profile":   profile,
+		"audioPath": audioPath,
+	})
+}
+
+// renameSpeakerInTranscript replaces all occurrences of oldName with newName in the transcript JSON.
+func renameSpeakerInTranscript(transcriptJSON, oldName, newName string) string {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(transcriptJSON), &data); err != nil {
+		return transcriptJSON
+	}
+
+	segments, ok := data["segments"].([]interface{})
+	if !ok {
+		return transcriptJSON
+	}
+
+	changed := false
+	for _, seg := range segments {
+		m, ok := seg.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if speaker, ok := m["speaker"].(string); ok && speaker == oldName {
+			m["speaker"] = newName
+			changed = true
+		}
+	}
+
+	// Also update speakers list
+	if speakers, ok := data["speakers"].([]interface{}); ok {
+		for _, sp := range speakers {
+			m, ok := sp.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if id, ok := m["id"].(string); ok && id == oldName {
+				m["id"] = newName
+				changed = true
+			}
+		}
+	}
+
+	if !changed {
+		return transcriptJSON
+	}
+
+	result, err := json.Marshal(data)
+	if err != nil {
+		return transcriptJSON
+	}
+	return string(result)
+}
+
 // writeJSON encodes data as JSON and writes it to the response with the given status code.
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	if data == nil {

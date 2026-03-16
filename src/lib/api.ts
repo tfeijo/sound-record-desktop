@@ -3,6 +3,7 @@ import type {
   RecordingStartResponse,
   RecordingStopResponse,
   RecordingStatusResponse,
+  SpeakerProfile,
 } from "./types";
 
 const API_BASE = "http://localhost:9876";
@@ -69,6 +70,53 @@ export function updateSettings(
     method: "PUT",
     body: JSON.stringify(settings),
   });
+}
+
+// --- Speaker Profiles ---
+
+export function listSpeakers(): Promise<SpeakerProfile[]> {
+  return request<SpeakerProfile[]>("/api/speakers");
+}
+
+export function createSpeaker(name: string): Promise<SpeakerProfile> {
+  return request<SpeakerProfile>("/api/speakers", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function updateSpeaker(
+  id: string,
+  name: string,
+): Promise<SpeakerProfile> {
+  return request<SpeakerProfile>(`/api/speakers/${id}`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function deleteSpeaker(id: string): Promise<void> {
+  return request<void>(`/api/speakers/${id}`, { method: "DELETE" });
+}
+
+export interface EnrollSpeakerBody {
+  meetingId: string;
+  speaker: string;
+  name: string;
+  start: number;
+  end: number;
+}
+
+export function enrollSpeaker(
+  body: EnrollSpeakerBody,
+): Promise<{ profile: SpeakerProfile; audioPath: string }> {
+  return request<{ profile: SpeakerProfile; audioPath: string }>(
+    "/api/speakers/enroll",
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 export function regenerateSummary(
