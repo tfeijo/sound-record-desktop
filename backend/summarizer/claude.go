@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -125,7 +126,7 @@ func (c *Client) Summarize(ctx context.Context, transcript string) (*Summary, er
 	}
 	defer resp.Body.Close()
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB cap
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -150,8 +151,18 @@ func (c *Client) Summarize(ctx context.Context, transcript string) (*Summary, er
 		return nil, fmt.Errorf("empty response from Claude")
 	}
 
+	if apiResp.StopReason == "max_tokens" {
+		return nil, fmt.Errorf("response truncated (max_tokens reached) — try a shorter transcript or increase maxTokens")
+	}
+
 	// Parse the JSON from Claude's text response
 	text := apiResp.Content[0].Text
+	// Strip markdown code fences if Claude wraps the JSON
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(text, "```json")
+	text = strings.TrimPrefix(text, "```")
+	text = strings.TrimSuffix(text, "```")
+	text = strings.TrimSpace(text)
 	var summary Summary
 	if err := json.Unmarshal([]byte(text), &summary); err != nil {
 		return nil, fmt.Errorf("parse summary json: %w (raw: %.500s)", err, text)
@@ -163,18 +174,3 @@ func (c *Client) Summarize(ctx context.Context, transcript string) (*Summary, er
 	return &summary, nil
 }
 
-// FormatTranscriptForPrompt converts transcript segments into a readable text format.
-func FormatTranscriptForPrompt(segments []struct {
-	Speaker string  `json:"speaker"`
-	Start   float64 `json:"start"`
-	End     float64 `json:"end"`
-	Text    string  `json:"text"`
-}) string {
-	var buf bytes.Buffer
-	for _, seg := range segments {
-		minutes := int(seg.Start) / 60
-		seconds := int(seg.Start) % 60
-		fmt.Fprintf(&buf, "[%d:%02d] %s: %s\n", minutes, seconds, seg.Speaker, seg.Text)
-	}
-	return buf.String()
-}
