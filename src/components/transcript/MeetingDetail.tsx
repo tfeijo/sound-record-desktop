@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { getMeeting } from "@/lib/api";
+import { getMeeting, regenerateSummary } from "@/lib/api";
 import { TranscriptViewer } from "./TranscriptViewer";
-import type { Meeting, TranscriptionResult } from "@/lib/types";
+import { ReportPreview } from "../meeting/ReportPreview";
+import type { Meeting, MeetingSummary, TranscriptionResult } from "@/lib/types";
 
 function formatDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -32,38 +33,101 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+type Tab = "summary" | "transcript";
+
 interface MeetingDetailProps {
   meetingId: string;
 }
 
 export function MeetingDetail({ meetingId }: MeetingDetailProps) {
   const [meeting, setMeeting] = useState<Meeting | null>(null);
-  const [transcript, setTranscript] = useState<TranscriptionResult | null>(
-    null,
-  );
+  const [transcript, setTranscript] = useState<TranscriptionResult | null>(null);
+  const [summary, setSummary] = useState<MeetingSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [regenerating, setRegenerating] = useState(false);
+  const [activeTab, setActiveTab] = useState<Tab>("summary");
 
-  useEffect(() => {
-    async function load() {
-      try {
-        const m = await getMeeting(meetingId);
-        setMeeting(m);
+  const loadMeeting = useCallback(async () => {
+    try {
+      const m = await getMeeting(meetingId);
+      setMeeting(m);
 
-        if (m.transcriptJson) {
+      // Parse transcript and summary independently so one bad field
+      // does not prevent the other from loading
+      if (m.transcriptJson) {
+        try {
           const parsed = JSON.parse(m.transcriptJson);
           if (parsed && Array.isArray(parsed.segments)) {
             setTranscript(parsed as TranscriptionResult);
           }
+        } catch {
+          // Malformed transcript JSON — skip silently
         }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load meeting");
-      } finally {
-        setLoading(false);
       }
+
+      if (m.summaryJson) {
+        try {
+          const parsed = JSON.parse(m.summaryJson);
+          if (parsed && typeof parsed.summary === "string") {
+            setSummary(parsed as MeetingSummary);
+          }
+        } catch {
+          // Malformed summary JSON — skip silently
+        }
+      }
+
+      return m;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load meeting");
+      return null;
+    } finally {
+      setLoading(false);
     }
-    load();
   }, [meetingId]);
+
+  useEffect(() => {
+    loadMeeting();
+  }, [loadMeeting]);
+
+  // Default to transcript tab if no summary available
+  useEffect(() => {
+    if (!loading && !summary && transcript) {
+      setActiveTab("transcript");
+    }
+  }, [loading, summary, transcript]);
+
+  const handleRegenerate = async () => {
+    if (regenerating) return;
+    setRegenerating(true);
+    setError(null);
+    try {
+      await regenerateSummary(meetingId);
+      // Poll until meeting status returns to "done" (or error/timeout)
+      const maxAttempts = 30; // ~60 seconds max
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        attempts++;
+        try {
+          const m = await getMeeting(meetingId);
+          if (m.status === "done" || m.status === "error" || attempts >= maxAttempts) {
+            clearInterval(poll);
+            await loadMeeting();
+            setRegenerating(false);
+            if (m.summaryJson) {
+              setActiveTab("summary");
+            }
+          }
+        } catch {
+          clearInterval(poll);
+          setRegenerating(false);
+        }
+      }, 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to regenerate");
+      setRegenerating(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -86,6 +150,9 @@ export function MeetingDetail({ meetingId }: MeetingDetailProps) {
       </main>
     );
   }
+
+  const hasSummary = summary !== null;
+  const hasTranscript = transcript !== null;
 
   return (
     <main className="min-h-screen bg-neutral-950 text-white">
@@ -113,7 +180,30 @@ export function MeetingDetail({ meetingId }: MeetingDetailProps) {
               )}
             </div>
           </div>
-          <StatusBadge status={meeting.status} />
+          <div className="flex items-center gap-2">
+            <StatusBadge status={meeting.status} />
+          </div>
+        </div>
+
+        {/* Action buttons */}
+        <div className="mb-6 flex items-center gap-3">
+          {hasTranscript && (
+            <button
+              onClick={handleRegenerate}
+              disabled={regenerating}
+              className="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {regenerating ? "Regenerating..." : "Regenerate Summary"}
+            </button>
+          )}
+          {meeting.obsidianPath && (
+            <a
+              href={`obsidian://open?path=${encodeURIComponent(meeting.obsidianPath)}`}
+              className="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:bg-neutral-700"
+            >
+              Open in Obsidian
+            </a>
+          )}
         </div>
 
         {/* Error */}
@@ -123,29 +213,73 @@ export function MeetingDetail({ meetingId }: MeetingDetailProps) {
           </div>
         )}
 
-        {/* Transcript */}
-        {transcript ? (
-          <section>
-            <h2 className="mb-3 text-lg font-semibold text-neutral-200">
-              Transcript
-            </h2>
-            <TranscriptViewer transcript={transcript} />
-          </section>
-        ) : meeting.status === "transcribing" ? (
-          <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center">
-            <p className="text-neutral-400">Transcribing audio...</p>
-            <p className="mt-1 text-sm text-neutral-500">
-              This may take a few minutes depending on the recording length.
-            </p>
-          </div>
-        ) : meeting.status === "recording" ? (
-          <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center">
-            <p className="text-neutral-400">Recording in progress...</p>
-          </div>
-        ) : (
-          <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center">
-            <p className="text-neutral-500">No transcript available.</p>
-          </div>
+        {/* Tabs */}
+        {(hasSummary || hasTranscript) && (
+          <>
+            <div className="mb-4 flex border-b border-neutral-800">
+              {hasSummary && (
+                <button
+                  onClick={() => setActiveTab("summary")}
+                  className={`px-4 py-2 text-sm font-medium transition-colors ${
+                    activeTab === "summary"
+                      ? "border-b-2 border-blue-500 text-blue-400"
+                      : "text-neutral-500 hover:text-neutral-300"
+                  }`}
+                >
+                  Summary
+                </button>
+              )}
+              {hasTranscript && (
+                <button
+                  onClick={() => setActiveTab("transcript")}
+                  className={`px-4 py-2 text-sm font-medium transition-colors ${
+                    activeTab === "transcript"
+                      ? "border-b-2 border-blue-500 text-blue-400"
+                      : "text-neutral-500 hover:text-neutral-300"
+                  }`}
+                >
+                  Transcript
+                </button>
+              )}
+            </div>
+
+            {activeTab === "summary" && summary && (
+              <ReportPreview summary={summary} />
+            )}
+
+            {activeTab === "transcript" && transcript && (
+              <TranscriptViewer transcript={transcript} />
+            )}
+          </>
+        )}
+
+        {/* Status-specific messages when no content yet */}
+        {!hasSummary && !hasTranscript && (
+          <>
+            {meeting.status === "transcribing" && (
+              <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center">
+                <p className="text-neutral-400">Transcribing audio...</p>
+                <p className="mt-1 text-sm text-neutral-500">
+                  This may take a few minutes depending on the recording length.
+                </p>
+              </div>
+            )}
+            {meeting.status === "summarizing" && (
+              <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center">
+                <p className="text-neutral-400">Generating summary...</p>
+              </div>
+            )}
+            {meeting.status === "recording" && (
+              <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center">
+                <p className="text-neutral-400">Recording in progress...</p>
+              </div>
+            )}
+            {meeting.status === "done" && (
+              <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center">
+                <p className="text-neutral-500">No content available.</p>
+              </div>
+            )}
+          </>
         )}
       </div>
     </main>

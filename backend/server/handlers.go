@@ -218,6 +218,33 @@ func (h *Handlers) GetMeeting(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, meeting)
 }
 
+// RegenerateSummary handles POST /api/meetings/{id}/regenerate.
+func (h *Handlers) RegenerateSummary(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	meeting, err := h.Store.GetMeeting(id)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "meeting not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to get meeting"})
+		return
+	}
+	if meeting.TranscriptJSON == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no transcript to summarize"})
+		return
+	}
+
+	// Run regeneration in background
+	go func() {
+		if err := h.Pipeline.RegenerateSummary(h.AppCtx, id); err != nil {
+			log.Printf("[handler] Regenerate summary failed for %s: %v", id, err)
+		}
+	}()
+
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "regenerating"})
+}
+
 // DeleteMeeting handles DELETE /api/meetings/{id}.
 func (h *Handlers) DeleteMeeting(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")

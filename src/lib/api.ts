@@ -57,3 +57,11 @@ export function listMeetings(
 export function deleteMeeting(id: string): Promise<void> {
   return request<void>(`/api/meetings/${id}`, { method: "DELETE" });
 }
+
+export function regenerateSummary(
+  id: string,
+): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/meetings/${id}/regenerate`, {
+    method: "POST",
+  });
+}
