@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/tfeijo/sound-record-desktop/backend/models"
 	"github.com/tfeijo/sound-record-desktop/backend/summarizer"
@@ -51,10 +51,7 @@ func (w *Writer) Write(meeting *models.Meeting) (string, error) {
 		return "", fmt.Errorf("obsidian vault path not configured")
 	}
 
-	data, err := buildTemplateData(meeting)
-	if err != nil {
-		return "", fmt.Errorf("build template data: %w", err)
-	}
+	data := buildTemplateData(meeting)
 
 	// Render template
 	var buf bytes.Buffer
@@ -68,9 +65,14 @@ func (w *Writer) Write(meeting *models.Meeting) (string, error) {
 		return "", fmt.Errorf("create meetings directory: %w", err)
 	}
 
-	// Build filename: YYYY-MM-DD-title-slug.md
+	// Build filename: YYYY-MM-DD-title-slug-meetingID.md
+	// Append short meeting ID to prevent filename collisions
 	slug := slugify(data.Title)
-	filename := fmt.Sprintf("%s-%s.md", data.Date, slug)
+	shortID := meeting.ID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	filename := fmt.Sprintf("%s-%s-%s.md", data.Date, slug, shortID)
 	filePath := filepath.Join(meetingsDir, filename)
 
 	if err := os.WriteFile(filePath, buf.Bytes(), 0o644); err != nil {
@@ -81,7 +83,7 @@ func (w *Writer) Write(meeting *models.Meeting) (string, error) {
 	return filePath, nil
 }
 
-func buildTemplateData(meeting *models.Meeting) (*templateData, error) {
+func buildTemplateData(meeting *models.Meeting) *templateData {
 	data := &templateData{
 		Title:    meeting.Title,
 		Date:     meeting.Date,
@@ -132,7 +134,7 @@ func buildTemplateData(meeting *models.Meeting) (*templateData, error) {
 		}
 	}
 
-	return data, nil
+	return data
 }
 
 var nonAlphanumeric = regexp.MustCompile(`[^a-z0-9]+`)
@@ -164,8 +166,8 @@ func formatDuration(seconds int) string {
 }
 
 func formatTimestamp(seconds float64) string {
-	t := time.Duration(seconds * float64(time.Second))
-	m := int(t.Minutes())
-	s := int(t.Seconds()) % 60
+	total := int(math.Round(seconds))
+	m := total / 60
+	s := total % 60
 	return fmt.Sprintf("%d:%02d", m, s)
 }

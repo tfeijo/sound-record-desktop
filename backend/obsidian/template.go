@@ -1,14 +1,25 @@
 package obsidian
 
-import "text/template"
+import (
+	"strings"
+	"text/template"
+)
 
-var meetingTemplate = template.Must(template.New("meeting").Parse(`---
-title: "{{.Title}}"
+var templateFuncs = template.FuncMap{
+	"yamlEscape": func(s string) string {
+		s = strings.ReplaceAll(s, `\`, `\\`)
+		s = strings.ReplaceAll(s, `"`, `\"`)
+		return s
+	},
+}
+
+var meetingTemplate = template.Must(template.New("meeting").Funcs(templateFuncs).Parse(`---
+title: "{{yamlEscape .Title}}"
 date: {{.Date}}
 duration: {{.Duration}}
 speakers:
 {{- range .Speakers}}
-  - "{{.}}"
+  - "{{yamlEscape .}}"
 {{- end}}
 tags: [meeting, meetnotes]
 ---

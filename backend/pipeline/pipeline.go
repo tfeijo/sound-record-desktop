@@ -19,7 +19,7 @@ type Broadcaster interface {
 	BroadcastJSON(msgType string, payload interface{})
 }
 
-// Runner orchestrates the post-recording pipeline: transcription → summarization → (future: obsidian).
+// Runner orchestrates the post-recording pipeline: transcription → summarization → Obsidian write.
 type Runner struct {
 	store       *store.Store
 	broadcast   Broadcaster
