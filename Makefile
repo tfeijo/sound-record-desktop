@@ -2,6 +2,7 @@
 # Layers: Next.js frontend | Go backend | Rust/Tauri shell | Python ML sidecar
 
 -include .env
+export
 
 .PHONY: dev dev-frontend dev-backend dev-tauri build clean deps backend test lint help
 
