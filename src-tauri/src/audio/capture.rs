@@ -27,6 +27,18 @@ struct RecordingStoppedPayload {
     system_path: String,
 }
 
+/// Result returned from stop_recording containing file paths.
+pub struct StopResult {
+    pub mic_path: String,
+    pub system_path: String,
+}
+
+impl std::fmt::Display for StopResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "mic: {}, system: {}", self.mic_path, self.system_path)
+    }
+}
+
 /// Manages audio capture for a recording session.
 /// Orchestrates both microphone and system audio recorders.
 pub struct AudioCapture {
@@ -113,8 +125,8 @@ impl AudioCapture {
         Ok(())
     }
 
-    /// Stop the current recording and return the mic WAV file path.
-    pub fn stop_recording(&self, app_handle: &AppHandle) -> Result<String, String> {
+    /// Stop the current recording and return file paths for both mic and system audio.
+    pub fn stop_recording(&self, app_handle: &AppHandle) -> Result<StopResult, String> {
         // Stop mic
         let mic_path = {
             let mut recorder = self.mic_recorder.lock().map_err(|e| e.to_string())?;
@@ -158,7 +170,10 @@ impl AudioCapture {
             system_path
         );
 
-        Ok(mic_path_str)
+        Ok(StopResult {
+            mic_path: mic_path_str,
+            system_path,
+        })
     }
 }
 

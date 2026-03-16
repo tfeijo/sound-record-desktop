@@ -5,12 +5,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/tfeijo/sound-record-desktop/backend/models"
 
 	_ "modernc.org/sqlite"
 )
+
+// isDuplicateColumnErr checks if the error is a "duplicate column name" error
+// from an ALTER TABLE ADD COLUMN that was already applied.
+func isDuplicateColumnErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate column name")
+}
 
 // DefaultDBPath returns the default database path for macOS.
 func DefaultDBPath() string {
@@ -74,6 +81,8 @@ func (s *Store) migrate() error {
 			speaker_count   INTEGER NOT NULL DEFAULT 0,
 			status          TEXT NOT NULL DEFAULT 'recording',
 			audio_path      TEXT NOT NULL DEFAULT '',
+			mic_path        TEXT NOT NULL DEFAULT '',
+			system_path     TEXT NOT NULL DEFAULT '',
 			transcript_json TEXT NOT NULL DEFAULT '',
 			summary_json    TEXT NOT NULL DEFAULT '',
 			obsidian_path   TEXT NOT NULL DEFAULT '',
@@ -92,11 +101,18 @@ func (s *Store) migrate() error {
 			key   TEXT PRIMARY KEY,
 			value TEXT NOT NULL DEFAULT ''
 		)`,
+		// Add mic_path and system_path columns if they don't exist (idempotent via IF NOT EXISTS workaround).
+		`ALTER TABLE meetings ADD COLUMN mic_path TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE meetings ADD COLUMN system_path TEXT NOT NULL DEFAULT ''`,
 	}
 
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
-			return fmt.Errorf("migration: %w", err)
+			// Ignore "duplicate column" errors from ALTER TABLE migrations
+			// that have already been applied.
+			if !isDuplicateColumnErr(err) {
+				return fmt.Errorf("migration: %w", err)
+			}
 		}
 	}
 	return nil
@@ -112,13 +128,13 @@ func (s *Store) CreateMeeting(m *models.Meeting) error {
 
 	_, err := s.db.Exec(`
 		INSERT INTO meetings (id, title, date, start_time, end_time, duration_seconds,
-			speaker_count, status, audio_path, transcript_json, summary_json,
+			speaker_count, status, audio_path, mic_path, system_path, transcript_json, summary_json,
 			obsidian_path, meet_url, error, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.Title, m.Date,
 		formatTimePtr(m.StartTime), formatTimePtr(m.EndTime),
 		m.DurationSeconds, m.SpeakerCount, string(m.Status),
-		m.AudioPath, m.TranscriptJSON, m.SummaryJSON,
+		m.AudioPath, m.MicPath, m.SystemPath, m.TranscriptJSON, m.SummaryJSON,
 		m.ObsidianPath, m.MeetURL, m.Error,
 		m.CreatedAt.Format(time.RFC3339), m.UpdatedAt.Format(time.RFC3339),
 	)
@@ -129,7 +145,7 @@ func (s *Store) CreateMeeting(m *models.Meeting) error {
 func (s *Store) GetMeeting(id string) (*models.Meeting, error) {
 	row := s.db.QueryRow(`
 		SELECT id, title, date, start_time, end_time, duration_seconds,
-			speaker_count, status, audio_path, transcript_json, summary_json,
+			speaker_count, status, audio_path, mic_path, system_path, transcript_json, summary_json,
 			obsidian_path, meet_url, error, created_at, updated_at
 		FROM meetings WHERE id = ?`, id)
 
@@ -140,7 +156,7 @@ func (s *Store) GetMeeting(id string) (*models.Meeting, error) {
 func (s *Store) ListMeetings(limit, offset int) ([]models.Meeting, error) {
 	rows, err := s.db.Query(`
 		SELECT id, title, date, start_time, end_time, duration_seconds,
-			speaker_count, status, audio_path, transcript_json, summary_json,
+			speaker_count, status, audio_path, mic_path, system_path, transcript_json, summary_json,
 			obsidian_path, meet_url, error, created_at, updated_at
 		FROM meetings ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
@@ -167,13 +183,15 @@ func (s *Store) UpdateMeeting(m *models.Meeting) error {
 		UPDATE meetings SET
 			title = ?, date = ?, start_time = ?, end_time = ?,
 			duration_seconds = ?, speaker_count = ?, status = ?,
-			audio_path = ?, transcript_json = ?, summary_json = ?,
+			audio_path = ?, mic_path = ?, system_path = ?,
+			transcript_json = ?, summary_json = ?,
 			obsidian_path = ?, meet_url = ?, error = ?, updated_at = ?
 		WHERE id = ?`,
 		m.Title, m.Date,
 		formatTimePtr(m.StartTime), formatTimePtr(m.EndTime),
 		m.DurationSeconds, m.SpeakerCount, string(m.Status),
-		m.AudioPath, m.TranscriptJSON, m.SummaryJSON,
+		m.AudioPath, m.MicPath, m.SystemPath,
+		m.TranscriptJSON, m.SummaryJSON,
 		m.ObsidianPath, m.MeetURL, m.Error,
 		m.UpdatedAt.Format(time.RFC3339),
 		m.ID,
@@ -238,7 +256,7 @@ func scanMeetingFromScanner(s scanner) (*models.Meeting, error) {
 	err := s.Scan(
 		&m.ID, &m.Title, &m.Date, &startTime, &endTime,
 		&m.DurationSeconds, &m.SpeakerCount, &status,
-		&m.AudioPath, &m.TranscriptJSON, &m.SummaryJSON,
+		&m.AudioPath, &m.MicPath, &m.SystemPath, &m.TranscriptJSON, &m.SummaryJSON,
 		&m.ObsidianPath, &m.MeetURL, &m.Error,
 		&createdAt, &updatedAt,
 	)
