@@ -1,9 +1,12 @@
 """Merge mic and system audio transcription streams into a single chronological transcript."""
 
 import logging
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+_SPEAKER_PATTERN = re.compile(r"^Speaker \d+$")
 
 
 @dataclass
@@ -25,11 +28,16 @@ def merge_streams(
 
     Mic segments are always labeled with user_name.
     System segments retain their diarized speaker labels.
+    If user_name collides with a "Speaker N" label, system speakers
+    are prefixed with "Participant" instead.
 
     Returns:
         - merged: list of MergedSegment in chronological order
         - speakers: list of speaker info dicts with id, source, total_duration
     """
+    # Detect label collision: if user_name looks like "Speaker N", remap system labels
+    remap_system = _SPEAKER_PATTERN.match(user_name) is not None
+
     merged: list[MergedSegment] = []
     speaker_durations: dict[str, float] = {}
     speaker_sources: dict[str, str] = {}
@@ -51,6 +59,8 @@ def merge_streams(
     # Add system segments (diarized speakers)
     for seg in system_segments:
         speaker = seg.get("speaker", "Speaker 1")
+        if remap_system and _SPEAKER_PATTERN.match(speaker):
+            speaker = speaker.replace("Speaker", "Participant")
         merged.append(MergedSegment(
             speaker=speaker,
             start=seg["start"],
@@ -72,5 +82,8 @@ def merge_streams(
         for name, dur in speaker_durations.items()
     ]
 
-    logger.info(f"Merged {len(mic_segments)} mic + {len(system_segments)} system = {len(merged)} total segments, {len(speakers)} speakers")
+    logger.info(
+        "Merged %d mic + %d system = %d total segments, %d speakers",
+        len(mic_segments), len(system_segments), len(merged), len(speakers),
+    )
     return merged, speakers

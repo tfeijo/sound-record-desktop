@@ -50,7 +50,7 @@ class Diarizer:
         """Run speaker diarization on an audio file.
 
         Returns a list of DiarizedSegment with speaker labels (SPEAKER_00, SPEAKER_01, etc.).
-        If pyannote is not available, returns a single segment spanning the whole file.
+        If pyannote is not available, returns an empty list (caller falls back to single speaker).
         """
         if not self._pipeline:
             logger.info("Diarization not available — returning single-speaker fallback")
