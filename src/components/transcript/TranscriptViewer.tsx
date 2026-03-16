@@ -1,13 +1,24 @@
 "use client";
 
+import { useMemo } from "react";
 import type { TranscriptionResult } from "@/lib/types";
 import { SpeakerSegment } from "./SpeakerSegment";
+
+function formatSpeakerDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  return `${Math.round(seconds / 60)}m`;
+}
 
 interface TranscriptViewerProps {
   transcript: TranscriptionResult;
 }
 
 export function TranscriptViewer({ transcript }: TranscriptViewerProps) {
+  const speakerList = useMemo(
+    () => transcript.speakers.map((s) => s.id),
+    [transcript.speakers],
+  );
+
   if (transcript.segments.length === 0) {
     return (
       <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center text-neutral-500">
@@ -26,7 +37,7 @@ export function TranscriptViewer({ transcript }: TranscriptViewerProps) {
             className="rounded-full bg-neutral-800 px-3 py-1 text-xs text-neutral-300"
           >
             {speaker.id} ({speaker.source}) &middot;{" "}
-            {Math.round(speaker.total_duration / 60)}m
+            {formatSpeakerDuration(speaker.total_duration)}
           </span>
         ))}
         {transcript.language_detected && (
@@ -48,9 +59,13 @@ export function TranscriptViewer({ transcript }: TranscriptViewerProps) {
       )}
 
       {/* Segments */}
-      <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4 max-h-[600px] overflow-y-auto">
-        {transcript.segments.map((segment, i) => (
-          <SpeakerSegment key={i} segment={segment} />
+      <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4 max-h-[60vh] overflow-y-auto">
+        {transcript.segments.map((segment) => (
+          <SpeakerSegment
+            key={`${segment.speaker}-${segment.start}`}
+            segment={segment}
+            speakerList={speakerList}
+          />
         ))}
       </div>
     </div>

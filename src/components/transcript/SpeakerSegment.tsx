@@ -1,8 +1,5 @@
-"use client";
-
 import type { TranscriptSegment } from "@/lib/types";
 
-const SPEAKER_COLORS: Record<string, string> = {};
 const COLOR_PALETTE = [
   "text-blue-400",
   "text-emerald-400",
@@ -14,12 +11,9 @@ const COLOR_PALETTE = [
   "text-pink-400",
 ];
 
-function getSpeakerColor(speaker: string): string {
-  if (!SPEAKER_COLORS[speaker]) {
-    const idx = Object.keys(SPEAKER_COLORS).length % COLOR_PALETTE.length;
-    SPEAKER_COLORS[speaker] = COLOR_PALETTE[idx];
-  }
-  return SPEAKER_COLORS[speaker];
+function getSpeakerColor(speaker: string, speakerList: string[]): string {
+  const idx = speakerList.indexOf(speaker);
+  return COLOR_PALETTE[(idx >= 0 ? idx : 0) % COLOR_PALETTE.length];
 }
 
 function formatTimestamp(seconds: number): string {
@@ -30,10 +24,11 @@ function formatTimestamp(seconds: number): string {
 
 interface SpeakerSegmentProps {
   segment: TranscriptSegment;
+  speakerList: string[];
 }
 
-export function SpeakerSegment({ segment }: SpeakerSegmentProps) {
-  const color = getSpeakerColor(segment.speaker);
+export function SpeakerSegment({ segment, speakerList }: SpeakerSegmentProps) {
+  const color = getSpeakerColor(segment.speaker, speakerList);
 
   return (
     <div className="flex gap-3 py-2 border-b border-neutral-800 last:border-0">

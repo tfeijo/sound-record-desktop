@@ -51,8 +51,10 @@ export function MeetingDetail({ meetingId }: MeetingDetailProps) {
         setMeeting(m);
 
         if (m.transcriptJson) {
-          const parsed = JSON.parse(m.transcriptJson) as TranscriptionResult;
-          setTranscript(parsed);
+          const parsed = JSON.parse(m.transcriptJson);
+          if (parsed && Array.isArray(parsed.segments)) {
+            setTranscript(parsed as TranscriptionResult);
+          }
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load meeting");
