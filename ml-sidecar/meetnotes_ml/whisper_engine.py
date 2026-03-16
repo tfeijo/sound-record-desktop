@@ -1,7 +1,7 @@
 """Whisper transcription engine using faster-whisper."""
 
+import math
 import logging
-from pathlib import Path
 
 from faster_whisper import WhisperModel
 
@@ -32,11 +32,7 @@ class WhisperEngine:
                 "start": segment.start,
                 "end": segment.end,
                 "text": segment.text.strip(),
-                "confidence": segment.avg_logprob,
-                "words": [
-                    {"start": w.start, "end": w.end, "text": w.word, "probability": w.probability}
-                    for w in (segment.words or [])
-                ],
+                "confidence": math.exp(segment.avg_logprob),
             })
 
         detected_language = info.language if info else "unknown"
