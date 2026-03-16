@@ -62,11 +62,7 @@ func (r *Runner) runTranscription(ctx context.Context, meetingID string) error {
 		return err
 	}
 
-	// Update status to transcribing
-	meeting.Status = models.StatusTranscribing
-	if err := r.store.UpdateMeeting(meeting); err != nil {
-		log.Printf("[pipeline] Failed to update status: %v", err)
-	}
+	// Status is already set to transcribing by the handler before pipeline starts.
 
 	// Build transcription request
 	audioPaths := map[string]string{}
