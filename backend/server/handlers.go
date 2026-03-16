@@ -364,6 +364,15 @@ func (h *Handlers) GetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, settings)
 }
 
+// allowedSettingKeys defines the set of keys that can be written via the settings API.
+var allowedSettingKeys = map[string]bool{
+	"user_name":          true,
+	"obsidian_vault_path": true,
+	"whisper_model_size":  true,
+	"language":            true,
+	"auto_record":         true,
+}
+
 // UpdateSettings handles PUT /api/settings.
 // Accepts a JSON object of key-value pairs to upsert.
 func (h *Handlers) UpdateSettings(w http.ResponseWriter, r *http.Request) {
@@ -374,6 +383,10 @@ func (h *Handlers) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for key, value := range settings {
+		if !allowedSettingKeys[key] {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown setting key: " + key})
+			return
+		}
 		if err := h.Store.SetSetting(key, value); err != nil {
 			log.Printf("Error setting %s: %v", key, err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save settings"})

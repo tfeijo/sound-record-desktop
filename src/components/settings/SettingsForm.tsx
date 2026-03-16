@@ -57,6 +57,7 @@ export function SettingsForm() {
   const handleSave = async () => {
     setSaving(true);
     setSaved(false);
+    useSettingsStore.getState().setError(null);
     try {
       await updateSettings(settings);
       setSaved(true);
@@ -178,6 +179,7 @@ export function SettingsForm() {
         </div>
         <button
           role="switch"
+          aria-label="Auto-record on Google Meet"
           aria-checked={settings.auto_record === "true"}
           onClick={() =>
             handleChange(
@@ -211,7 +213,7 @@ export function SettingsForm() {
           {saving ? "Saving..." : "Save Settings"}
         </button>
         {saved && (
-          <span className="text-sm text-emerald-400">Settings saved</span>
+          <span role="status" className="text-sm text-emerald-400">Settings saved</span>
         )}
       </div>
     </div>
