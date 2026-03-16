@@ -1,3 +1,4 @@
+mod audio;
 mod commands;
 mod sidecar;
 mod tray;
@@ -9,6 +10,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(sidecar::SidecarState::new())
         .manage(commands::RecordingState::new())
+        .manage(audio::capture::AudioCapture::new().expect("Failed to initialize AudioCapture"))
         .invoke_handler(tauri::generate_handler![
             commands::start_recording,
             commands::stop_recording,
