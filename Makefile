@@ -38,8 +38,23 @@ dev-frontend: deps
 dev-backend:
 	cd backend && go run .
 
+TAURI_DIR := $(CURDIR)/src-tauri
+TAURI_BIN := $(TAURI_DIR)/target/debug/meetnotes
+ENTITLEMENTS := $(TAURI_DIR)/entitlements.plist
+
 dev-tauri: deps backend
-	@trap 'kill 0' INT TERM; pnpm tauri:dev & wait
+	@trap 'kill 0' INT TERM; \
+	echo "Starting Next.js dev server..."; \
+	pnpm dev & \
+	echo "Waiting for frontend on :3100..."; \
+	while ! curl -s -o /dev/null http://localhost:3100 2>/dev/null; do sleep 1; done; \
+	echo "Building Tauri (Rust)..."; \
+	cd $(TAURI_DIR) && cargo build --color always 2>&1; \
+	echo "Signing binary with mic entitlements..."; \
+	codesign --force --sign - --entitlements "$(ENTITLEMENTS)" "$(TAURI_BIN)"; \
+	echo "Launching MeetNotes..."; \
+	"$(TAURI_BIN)" & \
+	wait
 
 # --- Go Backend ---
 

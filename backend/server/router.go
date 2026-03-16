@@ -56,7 +56,7 @@ func NewRouter(hub *Hub, h *Handlers) http.Handler {
 
 	// Wrap with CORS for local development
 	handler := cors.New(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3100", "http://127.0.0.1:3100"},
+		AllowedOrigins:   []string{"http://localhost:3100", "http://127.0.0.1:3100", "tauri://localhost", "http://tauri.localhost"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
 		AllowedHeaders:   []string{"Content-Type", "Authorization"},
 		AllowCredentials: false,

@@ -78,10 +78,14 @@ export function useRecording() {
       if (invoke) {
         try {
           await invoke("start_recording", { meetingId: res.meetingId });
+          console.log("[Tauri] Audio capture started for meeting", res.meetingId);
         } catch (tauriErr) {
-          console.warn("Tauri start_recording failed:", tauriErr);
-          // Don't fail the whole flow - Go already created the meeting
+          const errMsg = tauriErr instanceof Error ? tauriErr.message : String(tauriErr);
+          console.error("[Tauri] start_recording failed:", errMsg);
+          s.setError(`Audio capture failed: ${errMsg}`);
         }
+      } else {
+        console.warn("[Tauri] Not in Tauri context, audio capture skipped");
       }
     } catch (err) {
       store

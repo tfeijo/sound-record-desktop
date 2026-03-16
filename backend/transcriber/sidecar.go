@@ -20,17 +20,20 @@ type Sidecar struct {
 }
 
 // NewSidecar creates a new Sidecar with default settings.
-// scriptDir is resolved to an absolute path relative to the working directory.
+// scriptDir is resolved by searching: env var, next to executable, cwd, project root.
 func NewSidecar() *Sidecar {
-	// Resolve ml-sidecar directory relative to the executable's location or cwd
-	scriptDir := "ml-sidecar"
-	if abs, err := filepath.Abs(scriptDir); err == nil {
-		scriptDir = abs
-	}
+	scriptDir := findMLSidecarDir()
 
 	pythonCmd := os.Getenv("MEETNOTES_PYTHON")
 	if pythonCmd == "" {
-		pythonCmd = "python3"
+		// Auto-detect venv Python next to ml-sidecar directory
+		venvPython := filepath.Join(scriptDir, ".venv", "bin", "python3")
+		if _, err := os.Stat(venvPython); err == nil {
+			pythonCmd = venvPython
+			log.Printf("[transcriber] Auto-detected venv Python: %s", pythonCmd)
+		} else {
+			pythonCmd = "python3"
+		}
 	} else if _, err := exec.LookPath(pythonCmd); err != nil {
 		log.Printf("[transcriber] MEETNOTES_PYTHON=%q not found: %v, falling back to python3", pythonCmd, err)
 		pythonCmd = "python3"
@@ -41,6 +44,53 @@ func NewSidecar() *Sidecar {
 		ScriptDir: scriptDir,
 		Timeout:   30 * time.Minute, // long meetings need time
 	}
+}
+
+// findMLSidecarDir locates the ml-sidecar directory by checking multiple locations.
+// Priority: MEETNOTES_ML_DIR env > next to executable > cwd > project root heuristic.
+func findMLSidecarDir() string {
+	// 1. Explicit env var
+	if envDir := os.Getenv("MEETNOTES_ML_DIR"); envDir != "" {
+		if abs, err := filepath.Abs(envDir); err == nil {
+			return abs
+		}
+		return envDir
+	}
+
+	candidates := []string{}
+
+	// 2. Relative to executable (for bundled app)
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "ml-sidecar"),
+			filepath.Join(exeDir, "..", "..", "..", "ml-sidecar"), // src-tauri/target/debug/../../../ml-sidecar
+		)
+	}
+
+	// 3. Relative to cwd
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(cwd, "ml-sidecar"),
+			filepath.Join(cwd, "..", "ml-sidecar"),
+		)
+	}
+
+	for _, c := range candidates {
+		abs, err := filepath.Abs(c)
+		if err != nil {
+			continue
+		}
+		if info, err := os.Stat(abs); err == nil && info.IsDir() {
+			log.Printf("[transcriber] Found ml-sidecar at: %s", abs)
+			return abs
+		}
+	}
+
+	// Fallback to cwd-relative (will error later with a clear message)
+	fallback, _ := filepath.Abs("ml-sidecar")
+	log.Printf("[transcriber] WARNING: ml-sidecar directory not found in any known location, using fallback: %s", fallback)
+	return fallback
 }
 
 // Transcribe spawns the Python sidecar, sends the request via stdin,

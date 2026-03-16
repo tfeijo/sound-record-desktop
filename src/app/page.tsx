@@ -25,7 +25,8 @@ export default function Home() {
         unlisten = await listen<{ level: number }>(
           "recording:level",
           (event) => {
-            useRecordingStore.getState().setAudioLevel(event.payload.level);
+            // Tauri emits 0.0-1.0, AudioLevelMeter expects 0-100
+            useRecordingStore.getState().setAudioLevel(event.payload.level * 100);
           },
         );
       } catch {
