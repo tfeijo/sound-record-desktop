@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tfeijo/sound-record-desktop/backend/meetdetect"
 	"github.com/tfeijo/sound-record-desktop/backend/server"
 	"github.com/tfeijo/sound-record-desktop/backend/store"
 )
@@ -42,6 +43,19 @@ func main() {
 	go hub.Run(ctx)
 
 	handlers := server.NewHandlers(db, hub, ctx)
+
+	// Start Google Meet auto-detection
+	detector := meetdetect.NewDetector(hub, meetdetect.MeetCallback{
+		OnMeetDetected: func(meetURL string) {
+			handlers.AutoStartRecording(meetURL)
+		},
+		OnMeetEnded: func() {
+			handlers.AutoStopRecording()
+		},
+	})
+	handlers.MeetDetector = detector
+	go detector.Run(ctx)
+
 	router := server.NewRouter(hub, handlers)
 
 	srv := &http.Server{

@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/tfeijo/sound-record-desktop/backend/meetdetect"
 	"github.com/tfeijo/sound-record-desktop/backend/models"
 	"github.com/tfeijo/sound-record-desktop/backend/pipeline"
 	"github.com/tfeijo/sound-record-desktop/backend/store"
@@ -19,14 +20,16 @@ import (
 
 // Handlers holds dependencies for HTTP handler methods.
 type Handlers struct {
-	Store    *store.Store
-	Hub      *Hub
-	Pipeline *pipeline.Runner
-	AppCtx   context.Context // server lifecycle context for background work
+	Store        *store.Store
+	Hub          *Hub
+	Pipeline     *pipeline.Runner
+	MeetDetector *meetdetect.Detector
+	AppCtx       context.Context // server lifecycle context for background work
 
 	mu        sync.RWMutex
 	state     string // idle, recording, processing, done, error
 	meetingID string
+	meetURL   string // Google Meet URL if auto-detected
 }
 
 // NewHandlers creates a Handlers with default recording state.
@@ -161,6 +164,7 @@ func (h *Handlers) stopRecordingLocked(body stopRecordingRequest) (string, bool)
 
 	h.state = "idle"
 	h.meetingID = ""
+	h.meetURL = ""
 
 	return meetingID, hasAudio
 }
@@ -259,6 +263,82 @@ func (h *Handlers) DeleteMeeting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusNoContent, nil)
+}
+
+// AutoStartRecording is called by the Meet detector when a meeting is detected.
+// It only starts recording if auto-record is enabled and not already recording.
+func (h *Handlers) AutoStartRecording(meetURL string) {
+	autoRecord, _ := h.Store.GetSetting("auto_record")
+	if autoRecord != "true" {
+		log.Printf("[meetdetect] Auto-record disabled, ignoring Meet detection")
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.state == "recording" {
+		return
+	}
+
+	meetingID := uuid.New().String()
+	now := time.Now().UTC()
+
+	m := &models.Meeting{
+		ID:        meetingID,
+		Title:     "Google Meet",
+		Date:      now.Format("2006-01-02"),
+		StartTime: &now,
+		Status:    models.StatusRecording,
+		MeetURL:   meetURL,
+	}
+	if err := h.Store.CreateMeeting(m); err != nil {
+		log.Printf("[meetdetect] Error creating meeting: %v", err)
+		return
+	}
+
+	h.state = "recording"
+	h.meetingID = meetingID
+	h.meetURL = meetURL
+
+	h.Hub.Broadcast(Message{
+		Type: "recording:started",
+		Payload: map[string]string{
+			"meetingId": meetingID,
+			"source":    "auto",
+			"meetUrl":   meetURL,
+		},
+	})
+
+	log.Printf("[meetdetect] Auto-started recording for meeting %s (URL: %s)", meetingID, meetURL)
+}
+
+// AutoStopRecording is called by the Meet detector when a meeting ends.
+func (h *Handlers) AutoStopRecording() {
+	meetingID, hasAudio := h.stopRecordingLocked(stopRecordingRequest{})
+
+	if meetingID != "" && hasAudio {
+		h.Pipeline.RunAfterRecording(h.AppCtx, meetingID)
+	}
+
+	log.Printf("[meetdetect] Auto-stopped recording for meeting %s", meetingID)
+}
+
+// GetMeetDetectStatus handles GET /api/meetdetect/status.
+func (h *Handlers) GetMeetDetectStatus(w http.ResponseWriter, r *http.Request) {
+	autoRecord, _ := h.Store.GetSetting("auto_record")
+	inMeeting := false
+	meetURL := ""
+	if h.MeetDetector != nil {
+		inMeeting = h.MeetDetector.InMeeting()
+		meetURL = h.MeetDetector.CurrentURL()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"enabled":   autoRecord == "true",
+		"inMeeting": inMeeting,
+		"meetUrl":   meetURL,
+	})
 }
 
 // writeJSON encodes data as JSON and writes it to the response with the given status code.
