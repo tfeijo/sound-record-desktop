@@ -49,15 +49,26 @@ export function MeetingCard({ meeting, onDelete }: MeetingCardProps) {
     window.location.href = `/meeting?id=${meeting.id}`;
   };
 
-  const handleDelete = (e: React.MouseEvent) => {
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      handleClick();
+    }
+  };
+
+  const handleDelete = (e: React.MouseEvent | React.KeyboardEvent) => {
     e.stopPropagation();
+    if (!window.confirm(`Delete "${meeting.title || "Untitled Meeting"}"?`)) return;
     onDelete(meeting.id);
   };
 
   return (
     <div
+      role="button"
+      tabIndex={0}
       onClick={handleClick}
-      className="group cursor-pointer rounded-lg border border-neutral-800 bg-neutral-900 p-4 transition-colors hover:border-neutral-700 hover:bg-neutral-800/80"
+      onKeyDown={handleKeyDown}
+      className="group cursor-pointer rounded-lg border border-neutral-800 bg-neutral-900 p-4 transition-colors hover:border-neutral-700 hover:bg-neutral-800/80 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
@@ -88,8 +99,8 @@ export function MeetingCard({ meeting, onDelete }: MeetingCardProps) {
           </span>
           <button
             onClick={handleDelete}
-            className="rounded p-1 text-neutral-500 opacity-0 transition-opacity hover:bg-neutral-700 hover:text-neutral-300 group-hover:opacity-100"
-            title="Delete meeting"
+            className="rounded p-1 text-neutral-500 opacity-0 transition-opacity hover:bg-neutral-700 hover:text-neutral-300 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-blue-500/50"
+            aria-label={`Delete ${meeting.title || "Untitled Meeting"}`}
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"

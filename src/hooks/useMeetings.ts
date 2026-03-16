@@ -5,32 +5,35 @@ import { useMeetingStore } from "@/stores/meetingStore";
 import { listMeetings, deleteMeeting } from "@/lib/api";
 
 export function useMeetings() {
-  const { meetings, loading, error, setMeetings, setLoading, setError, removeMeeting } =
-    useMeetingStore();
+  const meetings = useMeetingStore((s) => s.meetings);
+  const loading = useMeetingStore((s) => s.loading);
+  const error = useMeetingStore((s) => s.error);
 
   const fetchMeetings = useCallback(async () => {
-    setLoading(true);
+    const store = useMeetingStore.getState();
+    store.setLoading(true);
     try {
       const data = await listMeetings();
-      setMeetings(data);
+      useMeetingStore.getState().setMeetings(data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load meetings");
+      useMeetingStore.getState().setError(
+        err instanceof Error ? err.message : "Failed to load meetings",
+      );
     } finally {
-      setLoading(false);
+      useMeetingStore.getState().setLoading(false);
     }
-  }, [setMeetings, setLoading, setError]);
+  }, []);
 
-  const handleDelete = useCallback(
-    async (id: string) => {
-      try {
-        await deleteMeeting(id);
-        removeMeeting(id);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to delete meeting");
-      }
-    },
-    [removeMeeting, setError],
-  );
+  const handleDelete = useCallback(async (id: string) => {
+    try {
+      await deleteMeeting(id);
+      useMeetingStore.getState().removeMeeting(id);
+    } catch (err) {
+      useMeetingStore.getState().setError(
+        err instanceof Error ? err.message : "Failed to delete meeting",
+      );
+    }
+  }, []);
 
   useEffect(() => {
     fetchMeetings();
