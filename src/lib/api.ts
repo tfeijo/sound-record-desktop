@@ -1,4 +1,5 @@
 import type {
+  Meeting,
   RecordingStartResponse,
   RecordingStopResponse,
   RecordingStatusResponse,
@@ -40,4 +41,19 @@ export function stopRecording(
 
 export function getRecordingStatus(): Promise<RecordingStatusResponse> {
   return request<RecordingStatusResponse>("/api/recording/status");
+}
+
+export function getMeeting(id: string): Promise<Meeting> {
+  return request<Meeting>(`/api/meetings/${id}`);
+}
+
+export function listMeetings(
+  limit = 50,
+  offset = 0,
+): Promise<Meeting[]> {
+  return request<Meeting[]>(`/api/meetings?limit=${limit}&offset=${offset}`);
+}
+
+export function deleteMeeting(id: string): Promise<void> {
+  return request<void>(`/api/meetings/${id}`, { method: "DELETE" });
 }
