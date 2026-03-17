@@ -1027,9 +1027,11 @@ fn run_screencapturekit_thread(
         dispatch_semaphore_wait(start_sema, DISPATCH_TIME_FOREVER);
         let _ = Box::from_raw(start_block_ctx);
 
-        if let Some(err) = start_error.lock().map_err(|e| e.to_string())?.take() {
-            let _ = Box::from_raw(ctx_ptr);
-            return Err(format!("Failed to start SCStream: {}", err));
+        if let Some(guard) = start_error.lock().ok() {
+            if let Some(ref err) = *guard {
+                let _ = Box::from_raw(ctx_ptr);
+                return Err(format!("Failed to start SCStream: {}", err));
+            }
         }
 
         log::info!("ScreenCaptureKit stream started successfully");
@@ -1107,40 +1109,26 @@ fn run_screencapturekit_thread(
         dispatch_semaphore_wait(stop_sema, DISPATCH_TIME_FOREVER);
         let _ = Box::from_raw(stop_block_ctx);
 
-        if let Some(err) = stop_error.lock().map_err(|e| e.to_string())?.take() {
-            log::warn!("Error stopping SCStream (non-fatal): {}", err);
+        if let Some(guard) = stop_error.lock().ok() {
+            if let Some(ref err) = *guard {
+                log::warn!("Error stopping SCStream (non-fatal): {}", err);
+            }
         }
 
         log::info!("ScreenCaptureKit stream stopped");
 
-        // C2 FIX: Remove the stream output before freeing the context.
-        // This ensures no in-flight GCD callbacks can reference ctx_ptr after we free it.
-        let sel_remove_output = sel_registerName(
-            b"removeStreamOutput:type:\0".as_ptr() as *const c_char,
-        );
-        let msg_remove_output: extern "C" fn(*mut c_void, *mut c_void, *mut c_void, c_long) =
-            std::mem::transmute(objc_msgSend as *const c_void);
-        msg_remove_output(stream, sel_remove_output, delegate, 1); // SCStreamOutputType.audio
-
-        // Barrier: dispatch_sync on the same global queue to drain any in-flight callbacks.
-        // After this returns, no more callbacks can be running that reference ctx_ptr.
-        extern "C" {
-            fn dispatch_sync_f(
-                queue: *mut c_void,
-                context: *mut c_void,
-                work: extern "C" fn(*mut c_void),
-            );
-        }
-        extern "C" fn noop_barrier(_ctx: *mut c_void) {}
-        dispatch_sync_f(queue, std::ptr::null_mut(), noop_barrier);
-
-        // Now safe to free the CaptureContext
-        // Clear the ivar first to prevent any stale access
+        // Clear the ivar first to prevent any stale callback access
         object_setInstanceVariable(
             delegate,
             b"_captureCtx\0".as_ptr() as *const c_char,
             std::ptr::null_mut(),
         );
+
+        // Small delay to let any in-flight GCD callbacks complete
+        // (they will see null ivar and return early)
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Now safe to free the CaptureContext
         let _ = Box::from_raw(ctx_ptr);
 
         // I2 FIX: Release all ObjC objects to prevent leaks
