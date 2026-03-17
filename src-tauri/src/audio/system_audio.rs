@@ -1,4 +1,3 @@
-use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -591,10 +590,17 @@ fn run_screencapturekit_thread(
         // Build an Objective-C block for the completion handler
         // Signature: ^void(SCShareableContent *content, NSError *error)
         //
-        // C1 FIX: Use ManuallyDrop on Arc fields to prevent use-after-free.
-        // ObjC copies blocks via memcpy without calling Arc::clone. ManuallyDrop
-        // prevents Rust from dropping the Arc when the stack block goes out of scope,
-        // since the semaphore wait guarantees the block has finished executing.
+        // SIGBUS FIX: All captured state is stored in a heap-allocated context
+        // struct, and the block only holds a raw pointer to it. Raw pointers are
+        // Copy, so _Block_copy's memcpy is safe. flags=0 means no
+        // BLOCK_HAS_COPY_DISPOSE, so the runtime won't call missing helpers.
+
+        struct CompletionBlockContext {
+            content_result: Arc<Mutex<Option<*mut c_void>>>,
+            error_result: Arc<Mutex<Option<String>>>,
+            semaphore: *mut c_void,
+        }
+
         #[repr(C)]
         struct CompletionBlock {
             isa: *const c_void,
@@ -602,9 +608,8 @@ fn run_screencapturekit_thread(
             reserved: i32,
             invoke: extern "C" fn(*mut CompletionBlock, *mut c_void, *mut c_void),
             descriptor: *const BlockDescriptor,
-            content_result: ManuallyDrop<Arc<Mutex<Option<*mut c_void>>>>,
-            error_result: ManuallyDrop<Arc<Mutex<Option<String>>>>,
-            semaphore: *mut c_void,
+            // Raw pointer to heap context — safe to memcpy
+            context: *mut CompletionBlockContext,
         }
 
         #[repr(C)]
@@ -613,7 +618,6 @@ fn run_screencapturekit_thread(
             size: u64,
         }
 
-        // I4 FIX: Use .lock().ok() instead of .lock().unwrap() to avoid panics across FFI.
         extern "C" fn completion_invoke(
             block: *mut CompletionBlock,
             content: *mut c_void,
@@ -621,8 +625,8 @@ fn run_screencapturekit_thread(
         ) {
             unsafe {
                 let block = &*block;
+                let ctx = &*block.context;
                 if !error.is_null() {
-                    // Get error description
                     let sel_desc = sel_registerName(
                         b"localizedDescription\0".as_ptr() as *const c_char,
                     );
@@ -630,7 +634,7 @@ fn run_screencapturekit_thread(
                         std::mem::transmute(objc_msgSend as *const c_void);
                     let desc_ns = msg(error, sel_desc);
                     let err_str = nsstring_to_rust(desc_ns);
-                    if let Some(mut guard) = block.error_result.lock().ok() {
+                    if let Some(mut guard) = ctx.error_result.lock().ok() {
                         *guard = Some(err_str);
                     }
                 } else if !content.is_null() {
@@ -640,17 +644,23 @@ fn run_screencapturekit_thread(
                     let msg: extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
                         std::mem::transmute(objc_msgSend as *const c_void);
                     msg(content, sel_retain);
-                    if let Some(mut guard) = block.content_result.lock().ok() {
+                    if let Some(mut guard) = ctx.content_result.lock().ok() {
                         *guard = Some(content);
                     }
                 }
-                dispatch_semaphore_signal(block.semaphore);
+                dispatch_semaphore_signal(ctx.semaphore);
             }
         }
 
         extern "C" {
             static _NSConcreteStackBlock: *const c_void;
         }
+
+        let completion_ctx = Box::into_raw(Box::new(CompletionBlockContext {
+            content_result: content_result.clone(),
+            error_result: error_result.clone(),
+            semaphore,
+        }));
 
         let descriptor = BlockDescriptor {
             reserved: 0,
@@ -659,13 +669,11 @@ fn run_screencapturekit_thread(
 
         let block = CompletionBlock {
             isa: &_NSConcreteStackBlock as *const _ as *const c_void,
-            flags: (1 << 25),
+            flags: 0,
             reserved: 0,
             invoke: completion_invoke,
             descriptor: &descriptor,
-            content_result: ManuallyDrop::new(content_result.clone()),
-            error_result: ManuallyDrop::new(error_result.clone()),
-            semaphore,
+            context: completion_ctx,
         };
 
         // Call SCShareableContent.getShareableContentExcludingDesktopWindows:onScreenWindowsOnly:completionHandler:
@@ -684,6 +692,10 @@ fn run_screencapturekit_thread(
 
         // Wait for completion
         let wait_result = dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+
+        // Block has been invoked; reclaim the heap context
+        let _ = Box::from_raw(completion_ctx);
+
         if wait_result != 0 {
             return Err("Timed out waiting for SCShareableContent".to_string());
         }
@@ -947,9 +959,14 @@ fn run_screencapturekit_thread(
         }
 
         // Start capture using completion handler
-        // C1 FIX: Use ManuallyDrop on Arc fields in StartBlock/StopBlock
+        // SIGBUS FIX: Same raw-pointer-to-heap-context pattern as CompletionBlock.
         let start_sema = dispatch_semaphore_create(0);
         let start_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+        struct StartBlockContext {
+            error_result: Arc<Mutex<Option<String>>>,
+            semaphore: *mut c_void,
+        }
 
         #[repr(C)]
         struct StartBlock {
@@ -958,14 +975,13 @@ fn run_screencapturekit_thread(
             reserved: i32,
             invoke: extern "C" fn(*mut StartBlock, *mut c_void),
             descriptor: *const BlockDescriptor,
-            error_result: ManuallyDrop<Arc<Mutex<Option<String>>>>,
-            semaphore: *mut c_void,
+            context: *mut StartBlockContext,
         }
 
-        // I4 FIX: Use .lock().ok() instead of .lock().unwrap()
         extern "C" fn start_invoke(block: *mut StartBlock, error: *mut c_void) {
             unsafe {
                 let block = &*block;
+                let ctx = &*block.context;
                 if !error.is_null() {
                     let sel_desc = sel_registerName(
                         b"localizedDescription\0".as_ptr() as *const c_char,
@@ -974,13 +990,18 @@ fn run_screencapturekit_thread(
                         std::mem::transmute(objc_msgSend as *const c_void);
                     let desc = msg(error, sel_desc);
                     let err_str = nsstring_to_rust(desc);
-                    if let Some(mut guard) = block.error_result.lock().ok() {
+                    if let Some(mut guard) = ctx.error_result.lock().ok() {
                         *guard = Some(err_str);
                     }
                 }
-                dispatch_semaphore_signal(block.semaphore);
+                dispatch_semaphore_signal(ctx.semaphore);
             }
         }
+
+        let start_block_ctx = Box::into_raw(Box::new(StartBlockContext {
+            error_result: start_error.clone(),
+            semaphore: start_sema,
+        }));
 
         let start_descriptor = BlockDescriptor {
             reserved: 0,
@@ -989,12 +1010,11 @@ fn run_screencapturekit_thread(
 
         let start_block = StartBlock {
             isa: &_NSConcreteStackBlock as *const _ as *const c_void,
-            flags: (1 << 25),
+            flags: 0,
             reserved: 0,
             invoke: start_invoke,
             descriptor: &start_descriptor,
-            error_result: ManuallyDrop::new(start_error.clone()),
-            semaphore: start_sema,
+            context: start_block_ctx,
         };
 
         let sel_start = sel_registerName(
@@ -1005,6 +1025,7 @@ fn run_screencapturekit_thread(
         msg_start(stream, sel_start, &start_block);
 
         dispatch_semaphore_wait(start_sema, DISPATCH_TIME_FOREVER);
+        let _ = Box::from_raw(start_block_ctx);
 
         if let Some(err) = start_error.lock().map_err(|e| e.to_string())?.take() {
             let _ = Box::from_raw(ctx_ptr);
@@ -1022,6 +1043,11 @@ fn run_screencapturekit_thread(
         let stop_sema = dispatch_semaphore_create(0);
         let stop_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
+        struct StopBlockContext {
+            error_result: Arc<Mutex<Option<String>>>,
+            semaphore: *mut c_void,
+        }
+
         #[repr(C)]
         struct StopBlock {
             isa: *const c_void,
@@ -1029,14 +1055,13 @@ fn run_screencapturekit_thread(
             reserved: i32,
             invoke: extern "C" fn(*mut StopBlock, *mut c_void),
             descriptor: *const BlockDescriptor,
-            error_result: ManuallyDrop<Arc<Mutex<Option<String>>>>,
-            semaphore: *mut c_void,
+            context: *mut StopBlockContext,
         }
 
-        // I4 FIX: Use .lock().ok() instead of .lock().unwrap()
         extern "C" fn stop_invoke(block: *mut StopBlock, error: *mut c_void) {
             unsafe {
                 let block = &*block;
+                let ctx = &*block.context;
                 if !error.is_null() {
                     let sel_desc = sel_registerName(
                         b"localizedDescription\0".as_ptr() as *const c_char,
@@ -1045,13 +1070,18 @@ fn run_screencapturekit_thread(
                         std::mem::transmute(objc_msgSend as *const c_void);
                     let desc = msg(error, sel_desc);
                     let err_str = nsstring_to_rust(desc);
-                    if let Some(mut guard) = block.error_result.lock().ok() {
+                    if let Some(mut guard) = ctx.error_result.lock().ok() {
                         *guard = Some(err_str);
                     }
                 }
-                dispatch_semaphore_signal(block.semaphore);
+                dispatch_semaphore_signal(ctx.semaphore);
             }
         }
+
+        let stop_block_ctx = Box::into_raw(Box::new(StopBlockContext {
+            error_result: stop_error.clone(),
+            semaphore: stop_sema,
+        }));
 
         let stop_descriptor = BlockDescriptor {
             reserved: 0,
@@ -1060,12 +1090,11 @@ fn run_screencapturekit_thread(
 
         let stop_block = StopBlock {
             isa: &_NSConcreteStackBlock as *const _ as *const c_void,
-            flags: (1 << 25),
+            flags: 0,
             reserved: 0,
             invoke: stop_invoke,
             descriptor: &stop_descriptor,
-            error_result: ManuallyDrop::new(stop_error.clone()),
-            semaphore: stop_sema,
+            context: stop_block_ctx,
         };
 
         let sel_stop = sel_registerName(
@@ -1076,6 +1105,7 @@ fn run_screencapturekit_thread(
         msg_stop(stream, sel_stop, &stop_block);
 
         dispatch_semaphore_wait(stop_sema, DISPATCH_TIME_FOREVER);
+        let _ = Box::from_raw(stop_block_ctx);
 
         if let Some(err) = stop_error.lock().map_err(|e| e.to_string())?.take() {
             log::warn!("Error stopping SCStream (non-fatal): {}", err);
