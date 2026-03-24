@@ -278,28 +278,32 @@ func (s *Sidecar) Finalize() (*FinalResult, error) {
 // Stop gracefully shuts down the sidecar by closing stdin and waiting for exit.
 func (s *Sidecar) Stop() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if !s.running {
+		s.mu.Unlock()
 		return nil
 	}
+
+	// Mark as not running and capture refs before releasing lock
+	s.running = false
+	stdinRef := s.stdin
+	cmdRef := s.cmd
+	s.mu.Unlock()
 
 	log.Printf("[transcriber] Stopping sidecar...")
 
 	// Close stdin to signal the Python process to exit
-	if s.stdin != nil {
-		_ = s.stdin.Close()
+	if stdinRef != nil {
+		_ = stdinRef.Close()
 	}
 
-	// Wait for process exit with timeout
+	// Wait for process exit with timeout (lock released so other callers aren't blocked)
 	done := make(chan error, 1)
 	go func() {
-		done <- s.cmd.Wait()
+		done <- cmdRef.Wait()
 	}()
 
 	select {
 	case err := <-done:
-		s.running = false
 		if err != nil {
 			log.Printf("[transcriber] Sidecar exited with: %v", err)
 		} else {
@@ -307,7 +311,9 @@ func (s *Sidecar) Stop() error {
 		}
 		return err
 	case <-time.After(10 * time.Second):
+		s.mu.Lock()
 		s.killLocked()
+		s.mu.Unlock()
 		return fmt.Errorf("sidecar did not exit within 10s, killed")
 	}
 }
@@ -342,6 +348,7 @@ func (s *Sidecar) writeJSON(v any) error {
 }
 
 // readResponse reads one JSON line from stdout.
+// Returns a copy of the bytes (Scanner.Bytes() is only valid until next Scan).
 // Caller must hold s.mu.
 func (s *Sidecar) readResponse() ([]byte, error) {
 	if !s.stdout.Scan() {
@@ -351,7 +358,10 @@ func (s *Sidecar) readResponse() ([]byte, error) {
 		}
 		return nil, fmt.Errorf("sidecar closed stdout unexpectedly")
 	}
-	return s.stdout.Bytes(), nil
+	line := s.stdout.Bytes()
+	out := make([]byte, len(line))
+	copy(out, line)
+	return out, nil
 }
 
 // drainStderr continuously reads stderr and logs it.
@@ -394,18 +404,13 @@ func (s *Sidecar) Transcribe(ctx context.Context, req *TranscriptionRequest) (*T
 
 	cmd := exec.CommandContext(ctx, s.PythonCmd, "-m", "meetnotes_ml")
 	cmd.Dir = s.ScriptDir
-
-	var stdinBuf, stdout, stderr [0]byte
-	_ = stdinBuf
-	cmd.Stdin = &readCloserBuf{data: input}
+	cmd.Stdin = &readBuf{data: input}
 
 	var stdoutBuf, stderrBuf limitedBuffer
 	stdoutBuf.max = 10 * 1024 * 1024
 	stderrBuf.max = 1 * 1024 * 1024
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
-	_ = stdout
-	_ = stderr
 
 	startTime := time.Now()
 	runErr := cmd.Run()
@@ -448,13 +453,13 @@ func (s *Sidecar) Transcribe(ctx context.Context, req *TranscriptionRequest) (*T
 	return &resp, nil
 }
 
-// readCloserBuf wraps a byte slice as an io.Reader for cmd.Stdin.
-type readCloserBuf struct {
+// readBuf wraps a byte slice as an io.Reader for cmd.Stdin.
+type readBuf struct {
 	data []byte
 	pos  int
 }
 
-func (r *readCloserBuf) Read(p []byte) (int, error) {
+func (r *readBuf) Read(p []byte) (int, error) {
 	if r.pos >= len(r.data) {
 		return 0, io.EOF
 	}
