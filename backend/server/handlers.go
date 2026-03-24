@@ -135,9 +135,14 @@ func (h *Handlers) StopRecording(w http.ResponseWriter, r *http.Request) {
 
 	meetingID, hasAudio := h.stopRecordingLocked(body)
 
-	// Finalize streaming transcription and run post-processing pipeline
-	if meetingID != "" && hasAudio {
-		h.Pipeline.FinalizeAndProcess(h.AppCtx, meetingID)
+	if meetingID != "" {
+		if hasAudio {
+			// Finalize streaming transcription and run post-processing pipeline
+			h.Pipeline.FinalizeAndProcess(h.AppCtx, meetingID)
+		} else if h.Pipeline.IsStreaming() {
+			// No audio paths but streaming was started — clean up
+			h.Pipeline.StopStreaming()
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
@@ -164,8 +169,15 @@ func (h *Handlers) stopRecordingLocked(body stopRecordingRequest) (string, bool)
 			} else if meeting.StartTime != nil {
 				meeting.DurationSeconds = int(now.Sub(*meeting.StartTime).Seconds())
 			}
-			meeting.MicPath = body.MicPath
-			meeting.SystemPath = body.SystemPath
+			// Only overwrite paths if stop body provides them (start may have set them already)
+			if body.MicPath != "" {
+				meeting.MicPath = body.MicPath
+			}
+			if body.SystemPath != "" {
+				meeting.SystemPath = body.SystemPath
+			}
+			// Check stored paths, not just stop body
+			hasAudio = meeting.MicPath != "" || meeting.SystemPath != ""
 			if hasAudio {
 				meeting.Status = models.StatusTranscribing
 			} else {

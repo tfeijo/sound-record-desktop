@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/tfeijo/sound-record-desktop/backend/models"
 	"github.com/tfeijo/sound-record-desktop/backend/obsidian"
@@ -25,8 +26,11 @@ type Runner struct {
 	store       *store.Store
 	broadcast   Broadcaster
 	sidecar     *transcriber.Sidecar
-	scheduler   *transcriber.ChunkScheduler
 	summarizer  *summarizer.Client
+
+	mu        sync.Mutex
+	scheduler *transcriber.ChunkScheduler
+	streaming bool // true while sidecar is active
 }
 
 // NewRunner creates a pipeline runner.
@@ -77,7 +81,12 @@ func (r *Runner) StartStreaming(ctx context.Context, meetingID, micPath, systemP
 		_ = r.sidecar.Stop()
 		return fmt.Errorf("create chunk scheduler: %w", err)
 	}
+
+	r.mu.Lock()
 	r.scheduler = scheduler
+	r.streaming = true
+	r.mu.Unlock()
+
 	r.scheduler.Start(ctx)
 
 	r.broadcastStage(meetingID, "streaming_started")
@@ -139,28 +148,48 @@ func (r *Runner) FinalizeAndProcess(ctx context.Context, meetingID string) {
 
 // StopStreaming stops the sidecar and scheduler without finalizing (e.g., on error/cancel).
 func (r *Runner) StopStreaming() {
-	if r.scheduler != nil {
-		r.scheduler.Stop()
-		r.scheduler.Cleanup()
-		r.scheduler = nil
+	r.mu.Lock()
+	sched := r.scheduler
+	r.scheduler = nil
+	r.streaming = false
+	r.mu.Unlock()
+
+	if sched != nil {
+		sched.Stop()
+		sched.Cleanup()
 	}
 	_ = r.sidecar.Stop()
 }
 
+// IsStreaming returns true if streaming transcription is active.
+func (r *Runner) IsStreaming() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.streaming
+}
+
 // TranscribedSeconds returns how many seconds have been transcribed so far.
 func (r *Runner) TranscribedSeconds() float64 {
-	if r.scheduler != nil {
-		return r.scheduler.TotalSeconds()
+	r.mu.Lock()
+	sched := r.scheduler
+	r.mu.Unlock()
+	if sched != nil {
+		return sched.TotalSeconds()
 	}
 	return 0
 }
 
 func (r *Runner) finalizeTranscription(meetingID string) error {
 	// Stop the scheduler (sends final chunk)
-	if r.scheduler != nil {
-		r.scheduler.Stop()
-		r.scheduler.Cleanup()
-		r.scheduler = nil
+	r.mu.Lock()
+	sched := r.scheduler
+	r.scheduler = nil
+	r.streaming = false
+	r.mu.Unlock()
+
+	if sched != nil {
+		sched.Stop()
+		sched.Cleanup()
 	}
 
 	// Finalize the sidecar — get complete transcript
@@ -174,7 +203,7 @@ func (r *Runner) finalizeTranscription(meetingID string) error {
 	_ = r.sidecar.Stop()
 
 	if result.Status == transcriber.StatusError {
-		return fmt.Errorf("transcription error from sidecar")
+		return fmt.Errorf("transcription error from sidecar: %v", result.Warnings)
 	}
 
 	// Convert FinalResult to the TranscriptionResponse format for DB storage
