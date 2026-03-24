@@ -115,15 +115,23 @@ func (r *Runner) FinalizeAndProcess(ctx context.Context, meetingID string) {
 
 		r.broadcastStage(meetingID, "transcription_complete")
 
-		// Send 100% progress
+		// Send 100% progress with fallback to wall-clock if transcript data unavailable
+		duration := 0.0
 		if meeting, err := r.store.GetMeeting(meetingID); err == nil && meeting.TranscriptJSON != "" {
 			var tr struct {
 				DurationSeconds float64 `json:"duration_seconds"`
 			}
 			if json.Unmarshal([]byte(meeting.TranscriptJSON), &tr) == nil {
-				r.broadcastProgressComplete(meetingID, tr.DurationSeconds)
+				duration = tr.DurationSeconds
 			}
 		}
+		if duration <= 0 {
+			r.mu.Lock()
+			duration = time.Since(r.recordingStart).Seconds()
+			r.mu.Unlock()
+			log.Printf("[pipeline] Using wall-clock fallback for 100%% progress: %.1fs", duration)
+		}
+		r.broadcastProgressComplete(meetingID, duration)
 
 		// Summarization step
 		if r.summarizer.Available() {
@@ -397,6 +405,8 @@ func (r *Runner) setMeetingError(meetingID, errMsg string) {
 
 // startProgressBroadcaster launches a goroutine that broadcasts transcription progress every second.
 func (r *Runner) startProgressBroadcaster(meetingID string) {
+	r.stopProgressBroadcaster() // cancel any existing broadcaster
+
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
 	r.progressCancel = cancel
