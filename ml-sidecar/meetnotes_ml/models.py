@@ -88,7 +88,8 @@ class ErrorResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Legacy types (kept for reference, not used in streaming flow)
+# Legacy types (used by current single-shot flow; will be removed once
+# streaming is fully wired in US-005)
 # ---------------------------------------------------------------------------
 
 class TranscriptionRequest(BaseModel):

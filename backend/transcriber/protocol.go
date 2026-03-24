@@ -1,5 +1,21 @@
 package transcriber
 
+// Valid model sizes accepted by the Python sidecar.
+const (
+	ModelSizeTiny    = "tiny"
+	ModelSizeBase    = "base"
+	ModelSizeSmall   = "small"
+	ModelSizeMedium  = "medium"
+	ModelSizeLargeV2 = "large-v2"
+)
+
+// Valid result statuses returned by the Python sidecar.
+const (
+	StatusSuccess = "success"
+	StatusPartial = "partial"
+	StatusError   = "error"
+)
+
 // ---------------------------------------------------------------------------
 // Shared types
 // ---------------------------------------------------------------------------
@@ -90,7 +106,8 @@ type SidecarMessage struct {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy types (kept for reference, not used in streaming flow)
+// Legacy types (used by current single-shot flow; will be removed once
+// streaming is fully wired in US-005)
 // ---------------------------------------------------------------------------
 
 // TranscriptionRequest is the old single-shot JSON sent to the Python sidecar.
