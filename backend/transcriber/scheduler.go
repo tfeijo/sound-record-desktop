@@ -61,16 +61,22 @@ func NewChunkScheduler(sidecar *Sidecar, micPath, systemPath string) (*ChunkSche
 
 // Start begins the periodic chunk loop. It returns immediately.
 func (cs *ChunkScheduler) Start(ctx context.Context) {
+	cs.mu.Lock()
 	ctx, cs.cancel = context.WithCancel(ctx)
+	cs.mu.Unlock()
 
 	go cs.loop(ctx)
 }
 
 // Stop signals the scheduler to stop and waits for it to finish.
-// Returns after the last chunk is sent.
+// Returns after the last chunk is sent. Must be called after Start.
 func (cs *ChunkScheduler) Stop() {
-	if cs.cancel != nil {
-		cs.cancel()
+	cs.mu.Lock()
+	cancelFn := cs.cancel
+	cs.mu.Unlock()
+
+	if cancelFn != nil {
+		cancelFn()
 	}
 	<-cs.done
 }
@@ -144,12 +150,23 @@ func (cs *ChunkScheduler) sendChunk() {
 		OffsetSeconds: offsetSeconds,
 	}
 
+	log.Printf("[scheduler] Chunk %d sending: mic=%.1fs sys=%.1fs offset=%.1fs",
+		chunkID, micDuration, sysDuration, offsetSeconds)
+
 	result, err := cs.sidecar.SendChunk(chunk)
 	if err != nil {
 		log.Printf("[scheduler] Chunk %d failed: %v", chunkID, err)
 	} else {
 		log.Printf("[scheduler] Chunk %d processed: %d segments, lang=%s",
 			result.ChunkID, len(result.Segments), result.LanguageDetected)
+	}
+
+	// Clean up temp chunk files after sidecar has read them
+	if micChunkPath != "" {
+		_ = os.Remove(micChunkPath)
+	}
+	if sysChunkPath != "" {
+		_ = os.Remove(sysChunkPath)
 	}
 
 	// Update state for next chunk
@@ -182,7 +199,9 @@ func (cs *ChunkScheduler) extractChunk(sourcePath string, offset *int64, label s
 	}
 	fileSize := stat.Size()
 
-	// First read: skip WAV header
+	// First read: skip WAV header.
+	// NOTE: hound crate (wav_writer.rs) writes exactly 44-byte headers (RIFF + fmt + data).
+	// If the WAV writer ever adds metadata chunks, this offset must be updated.
 	dataStart := int64(wavHeaderSize)
 	if *offset == 0 {
 		*offset = dataStart
@@ -196,16 +215,23 @@ func (cs *ChunkScheduler) extractChunk(sourcePath string, offset *int64, label s
 		return "", 0, nil // no new data
 	}
 
-	// Read new audio data
+	// Read new audio data (handle short reads from growing file)
 	buf := make([]byte, available)
-	if _, err := f.ReadAt(buf, *offset); err != nil && err != io.EOF {
+	n, err := f.ReadAt(buf, *offset)
+	if err != nil && err != io.EOF {
 		return "", 0, fmt.Errorf("read at offset %d: %w", *offset, err)
 	}
+	// Re-align to frame boundary in case of short read
+	n = (n / bytesPerFrame) * bytesPerFrame
+	if n <= 0 {
+		return "", 0, nil
+	}
+	buf = buf[:n]
 
-	*offset += available
+	*offset += int64(n)
 
 	// Calculate duration
-	numSamples := available / int64(bytesPerFrame)
+	numSamples := int64(n) / int64(bytesPerFrame)
 	duration := float64(numSamples) / float64(sampleRate)
 
 	// Write chunk to temp WAV file
