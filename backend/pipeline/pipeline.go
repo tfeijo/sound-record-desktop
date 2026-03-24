@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"sync"
+	"time"
 
 	"github.com/tfeijo/sound-record-desktop/backend/models"
 	"github.com/tfeijo/sound-record-desktop/backend/obsidian"
@@ -28,9 +30,11 @@ type Runner struct {
 	sidecar     *transcriber.Sidecar
 	summarizer  *summarizer.Client
 
-	mu        sync.Mutex
-	scheduler *transcriber.ChunkScheduler
-	streaming bool // true while sidecar is active
+	mu             sync.Mutex
+	scheduler      *transcriber.ChunkScheduler
+	streaming      bool // true while sidecar is active
+	recordingStart time.Time
+	progressCancel context.CancelFunc
 }
 
 // NewRunner creates a pipeline runner.
@@ -85,9 +89,11 @@ func (r *Runner) StartStreaming(ctx context.Context, meetingID, micPath, systemP
 	r.mu.Lock()
 	r.scheduler = scheduler
 	r.streaming = true
+	r.recordingStart = time.Now()
 	r.mu.Unlock()
 
 	r.scheduler.Start(ctx)
+	r.startProgressBroadcaster(meetingID)
 
 	r.broadcastStage(meetingID, "streaming_started")
 	log.Printf("[pipeline] Streaming transcription started for meeting %s", meetingID)
@@ -108,6 +114,24 @@ func (r *Runner) FinalizeAndProcess(ctx context.Context, meetingID string) {
 		}
 
 		r.broadcastStage(meetingID, "transcription_complete")
+
+		// Send 100% progress with fallback to wall-clock if transcript data unavailable
+		duration := 0.0
+		if meeting, err := r.store.GetMeeting(meetingID); err == nil && meeting.TranscriptJSON != "" {
+			var tr struct {
+				DurationSeconds float64 `json:"duration_seconds"`
+			}
+			if json.Unmarshal([]byte(meeting.TranscriptJSON), &tr) == nil {
+				duration = tr.DurationSeconds
+			}
+		}
+		if duration <= 0 {
+			r.mu.Lock()
+			duration = time.Since(r.recordingStart).Seconds()
+			r.mu.Unlock()
+			log.Printf("[pipeline] Using wall-clock fallback for 100%% progress: %.1fs", duration)
+		}
+		r.broadcastProgressComplete(meetingID, duration)
 
 		// Summarization step
 		if r.summarizer.Available() {
@@ -148,6 +172,8 @@ func (r *Runner) FinalizeAndProcess(ctx context.Context, meetingID string) {
 
 // StopStreaming stops the sidecar and scheduler without finalizing (e.g., on error/cancel).
 func (r *Runner) StopStreaming() {
+	r.stopProgressBroadcaster()
+
 	r.mu.Lock()
 	sched := r.scheduler
 	r.scheduler = nil
@@ -180,6 +206,8 @@ func (r *Runner) TranscribedSeconds() float64 {
 }
 
 func (r *Runner) finalizeTranscription(meetingID string) error {
+	r.stopProgressBroadcaster()
+
 	// Stop the scheduler (sends final chunk)
 	r.mu.Lock()
 	sched := r.scheduler
@@ -373,6 +401,69 @@ func (r *Runner) setMeetingError(meetingID, errMsg string) {
 	if err := r.store.UpdateMeeting(meeting); err != nil {
 		log.Printf("[pipeline] Failed to set meeting error: %v", err)
 	}
+}
+
+// startProgressBroadcaster launches a goroutine that broadcasts transcription progress every second.
+func (r *Runner) startProgressBroadcaster(meetingID string) {
+	r.stopProgressBroadcaster() // cancel any existing broadcaster
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r.mu.Lock()
+	r.progressCancel = cancel
+	r.mu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.mu.Lock()
+				start := r.recordingStart
+				r.mu.Unlock()
+
+				transcribed := r.TranscribedSeconds()
+				recorded := time.Since(start).Seconds()
+				if recorded < 1 {
+					continue
+				}
+
+				pct := math.Min(transcribed/recorded*100, 99) // cap at 99% until finalize
+
+				r.broadcast.BroadcastJSON("transcription_progress", map[string]interface{}{
+					"meetingId":             meetingID,
+					"percentage":            math.Round(pct),
+					"transcribed_seconds":   math.Round(transcribed*10) / 10,
+					"total_recorded_seconds": math.Round(recorded*10) / 10,
+				})
+			}
+		}
+	}()
+}
+
+// stopProgressBroadcaster cancels the progress broadcaster goroutine.
+func (r *Runner) stopProgressBroadcaster() {
+	r.mu.Lock()
+	cancel := r.progressCancel
+	r.progressCancel = nil
+	r.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// broadcastProgressComplete sends a 100% progress message after finalization.
+func (r *Runner) broadcastProgressComplete(meetingID string, durationSeconds float64) {
+	r.broadcast.BroadcastJSON("transcription_progress", map[string]interface{}{
+		"meetingId":             meetingID,
+		"percentage":            float64(100),
+		"transcribed_seconds":   math.Round(durationSeconds*10) / 10,
+		"total_recorded_seconds": math.Round(durationSeconds*10) / 10,
+	})
 }
 
 func (r *Runner) broadcastStage(meetingID, stage string) {
