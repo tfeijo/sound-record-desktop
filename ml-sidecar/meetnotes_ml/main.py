@@ -67,18 +67,23 @@ class StreamingSession:
         self.all_warnings: list[str] = []
         self.detected_language: str = ""
         self.total_duration: float = 0.0
-        self.system_audio_paths: list[str] = []
+        self.system_audio_paths: list[tuple[str, float]] = []  # (path, offset_seconds)
 
     def handle_init(self, msg: StreamInit) -> None:
-        self.device, compute_type = detect_device()
-        self.language = msg.language
-        self.user_name = msg.user_name
+        try:
+            self.device, compute_type = detect_device()
+            self.language = msg.language
+            self.user_name = msg.user_name
+            # TODO(US-006): use msg.known_speakers for speaker identification hints
 
-        logger.info(f"Init: model={msg.model_size}, device={self.device}, user={msg.user_name}")
-        self.engine = WhisperEngine(model_size=msg.model_size, device=self.device, compute_type=compute_type)
-        self.diarizer = Diarizer()
+            logger.info(f"Init: model={msg.model_size}, device={self.device}, user={msg.user_name}")
+            self.engine = WhisperEngine(model_size=msg.model_size, device=self.device, compute_type=compute_type)
+            self.diarizer = Diarizer()
 
-        send(ReadyResponse(model_size=msg.model_size, device=self.device))
+            send(ReadyResponse(model_size=msg.model_size, device=self.device))
+        except Exception as e:
+            logger.error(f"Init failed: {e}")
+            send(ErrorResponse(error=f"Init failed: {e}"))
 
     def handle_chunk(self, msg: StreamChunk) -> None:
         if self.engine is None:
@@ -126,7 +131,7 @@ class StreamingSession:
                         seg["end"] += msg.offset_seconds
                     new_sys_segs = segs
                     self.all_system_segments.extend(segs)
-                    self.system_audio_paths.append(system_path)
+                    self.system_audio_paths.append((system_path, msg.offset_seconds))
                     if lang and not chunk_language:
                         chunk_language = lang
                     if lang and not self.detected_language:
@@ -164,11 +169,14 @@ class StreamingSession:
         # Run diarization on accumulated system segments
         if self.all_system_segments and self.diarizer and self.diarizer.available:
             try:
-                # Diarize using all system audio paths
+                # Diarize using all system audio paths, offsetting to absolute time
                 all_diar_segments = []
-                for path in self.system_audio_paths:
+                for path, offset in self.system_audio_paths:
                     if os.path.isfile(path):
                         diar = self.diarizer.diarize(path)
+                        for d in diar:
+                            d.start += offset
+                            d.end += offset
                         all_diar_segments.extend(diar)
                 if all_diar_segments:
                     self.all_system_segments = align_segments(self.all_system_segments, all_diar_segments)
