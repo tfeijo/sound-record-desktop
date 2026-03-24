@@ -166,18 +166,19 @@ class StreamingSession:
         ))
 
     def handle_finalize(self) -> None:
-        # Run diarization on accumulated system segments
+        # Run incremental diarization on accumulated system segments
         if self.all_system_segments and self.diarizer and self.diarizer.available:
             try:
-                # Diarize using all system audio paths, offsetting to absolute time
+                # Diarize each chunk incrementally, accumulating speaker embeddings
                 all_diar_segments = []
                 for path, offset in self.system_audio_paths:
                     if os.path.isfile(path):
-                        diar = self.diarizer.diarize(path)
-                        for d in diar:
-                            d.start += offset
-                            d.end += offset
+                        diar = self.diarizer.add_chunk(path, offset=offset)
                         all_diar_segments.extend(diar)
+
+                # Final alignment pass: merge similar speakers across chunks
+                all_diar_segments = self.diarizer.finalize(all_diar_segments)
+
                 if all_diar_segments:
                     self.all_system_segments = align_segments(self.all_system_segments, all_diar_segments)
             except Exception as e:
