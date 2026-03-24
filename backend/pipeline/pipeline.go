@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/tfeijo/sound-record-desktop/backend/models"
 	"github.com/tfeijo/sound-record-desktop/backend/obsidian"
@@ -19,32 +20,88 @@ type Broadcaster interface {
 	BroadcastJSON(msgType string, payload interface{})
 }
 
-// Runner orchestrates the post-recording pipeline: transcription → summarization → Obsidian write.
+// Runner orchestrates the recording pipeline: streaming transcription during recording,
+// then summarization → Obsidian write after recording stops.
 type Runner struct {
 	store       *store.Store
 	broadcast   Broadcaster
-	transcriber *transcriber.Sidecar
+	sidecar     *transcriber.Sidecar
 	summarizer  *summarizer.Client
+
+	mu        sync.Mutex
+	scheduler *transcriber.ChunkScheduler
+	streaming bool // true while sidecar is active
 }
 
 // NewRunner creates a pipeline runner.
 func NewRunner(s *store.Store, b Broadcaster) *Runner {
 	return &Runner{
-		store:       s,
-		broadcast:   b,
-		transcriber: transcriber.NewSidecar(),
-		summarizer:  summarizer.NewClient(),
+		store:      s,
+		broadcast:  b,
+		sidecar:    transcriber.NewSidecar(),
+		summarizer: summarizer.NewClient(),
 	}
 }
 
-// RunAfterRecording executes the full pipeline for a meeting after recording stops.
-// It runs in a goroutine and sends WebSocket events for progress.
-func (r *Runner) RunAfterRecording(ctx context.Context, meetingID string) {
-	go func() {
-		r.broadcastStage(meetingID, "transcribing")
+// StartStreaming starts the sidecar and chunk scheduler when recording begins.
+// Called from the StartRecording handler with the meeting's audio file paths.
+func (r *Runner) StartStreaming(ctx context.Context, meetingID, micPath, systemPath string) error {
+	userName, _ := r.store.GetSetting("user_name")
+	if userName == "" {
+		userName = "User"
+	}
+	modelSize, _ := r.store.GetSetting("whisper_model_size")
+	if modelSize == "" {
+		modelSize = transcriber.ModelSizeBase
+	}
+	language, _ := r.store.GetSetting("language")
 
-		if err := r.runTranscription(ctx, meetingID); err != nil {
-			log.Printf("[pipeline] Transcription failed for %s: %v", meetingID, err)
+	profiles, _ := r.store.ListSpeakerProfiles()
+	knownSpeakers := make([]string, 0, len(profiles))
+	for _, p := range profiles {
+		knownSpeakers = append(knownSpeakers, p.Name)
+	}
+
+	init := &transcriber.StreamInit{
+		Type:          "init",
+		ModelSize:     modelSize,
+		Language:      language,
+		UserName:      userName,
+		KnownSpeakers: knownSpeakers,
+	}
+
+	ready, err := r.sidecar.Start(ctx, init)
+	if err != nil {
+		return fmt.Errorf("start sidecar: %w", err)
+	}
+	log.Printf("[pipeline] Sidecar ready: model=%s, device=%s", ready.ModelSize, ready.Device)
+
+	scheduler, err := transcriber.NewChunkScheduler(r.sidecar, micPath, systemPath)
+	if err != nil {
+		_ = r.sidecar.Stop()
+		return fmt.Errorf("create chunk scheduler: %w", err)
+	}
+
+	r.mu.Lock()
+	r.scheduler = scheduler
+	r.streaming = true
+	r.mu.Unlock()
+
+	r.scheduler.Start(ctx)
+
+	r.broadcastStage(meetingID, "streaming_started")
+	log.Printf("[pipeline] Streaming transcription started for meeting %s", meetingID)
+	return nil
+}
+
+// FinalizeAndProcess stops the scheduler, finalizes the transcript, saves it,
+// then runs summarization and Obsidian write. Runs in a goroutine.
+func (r *Runner) FinalizeAndProcess(ctx context.Context, meetingID string) {
+	go func() {
+		r.broadcastStage(meetingID, "finalizing")
+
+		if err := r.finalizeTranscription(meetingID); err != nil {
+			log.Printf("[pipeline] Finalize failed for %s: %v", meetingID, err)
 			r.setMeetingError(meetingID, err.Error())
 			r.broadcastError(meetingID, err.Error())
 			return
@@ -59,7 +116,6 @@ func (r *Runner) RunAfterRecording(ctx context.Context, meetingID string) {
 
 			if err := r.runSummarization(ctx, meetingID); err != nil {
 				log.Printf("[pipeline] Summarization failed for %s: %v", meetingID, err)
-				// Non-fatal: transcript is already saved, just log the error
 				r.broadcastStage(meetingID, "summary_error")
 			} else {
 				r.broadcastStage(meetingID, "summary_complete")
@@ -90,6 +146,98 @@ func (r *Runner) RunAfterRecording(ctx context.Context, meetingID string) {
 	}()
 }
 
+// StopStreaming stops the sidecar and scheduler without finalizing (e.g., on error/cancel).
+func (r *Runner) StopStreaming() {
+	r.mu.Lock()
+	sched := r.scheduler
+	r.scheduler = nil
+	r.streaming = false
+	r.mu.Unlock()
+
+	if sched != nil {
+		sched.Stop()
+		sched.Cleanup()
+	}
+	_ = r.sidecar.Stop()
+}
+
+// IsStreaming returns true if streaming transcription is active.
+func (r *Runner) IsStreaming() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.streaming
+}
+
+// TranscribedSeconds returns how many seconds have been transcribed so far.
+func (r *Runner) TranscribedSeconds() float64 {
+	r.mu.Lock()
+	sched := r.scheduler
+	r.mu.Unlock()
+	if sched != nil {
+		return sched.TotalSeconds()
+	}
+	return 0
+}
+
+func (r *Runner) finalizeTranscription(meetingID string) error {
+	// Stop the scheduler (sends final chunk)
+	r.mu.Lock()
+	sched := r.scheduler
+	r.scheduler = nil
+	r.streaming = false
+	r.mu.Unlock()
+
+	if sched != nil {
+		sched.Stop()
+		sched.Cleanup()
+	}
+
+	// Finalize the sidecar — get complete transcript
+	result, err := r.sidecar.Finalize()
+	if err != nil {
+		_ = r.sidecar.Stop()
+		return fmt.Errorf("finalize sidecar: %w", err)
+	}
+
+	// Stop the sidecar process
+	_ = r.sidecar.Stop()
+
+	if result.Status == transcriber.StatusError {
+		return fmt.Errorf("transcription error from sidecar: %v", result.Warnings)
+	}
+
+	// Convert FinalResult to the TranscriptionResponse format for DB storage
+	resp := &transcriber.TranscriptionResponse{
+		Status:           result.Status,
+		DurationSeconds:  result.DurationSeconds,
+		Segments:         result.Segments,
+		Speakers:         result.Speakers,
+		LanguageDetected: result.LanguageDetected,
+		Warnings:         result.Warnings,
+	}
+
+	transcriptJSON, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("marshal transcript: %w", err)
+	}
+
+	meeting, err := r.store.GetMeeting(meetingID)
+	if err != nil {
+		return fmt.Errorf("get meeting: %w", err)
+	}
+
+	meeting.TranscriptJSON = string(transcriptJSON)
+	meeting.SpeakerCount = len(resp.Speakers)
+	if err := r.store.UpdateMeeting(meeting); err != nil {
+		return fmt.Errorf("update meeting: %w", err)
+	}
+
+	log.Printf("[pipeline] Transcript saved: %d segments, %d speakers, %.0fs",
+		len(resp.Segments), len(resp.Speakers), resp.DurationSeconds)
+
+	return nil
+}
+
 // RegenerateSummary re-runs summarization for an existing meeting with a transcript.
 func (r *Runner) RegenerateSummary(ctx context.Context, meetingID string) error {
 	if !r.summarizer.Available() {
@@ -107,7 +255,6 @@ func (r *Runner) RegenerateSummary(ctx context.Context, meetingID string) error 
 
 	r.broadcastStage(meetingID, "summary_complete")
 
-	// Re-run Obsidian write if configured
 	vaultPath, _ := r.store.GetSetting("obsidian_vault_path")
 	if vaultPath != "" {
 		if err := r.runObsidianWrite(meetingID, vaultPath); err != nil {
@@ -117,72 +264,6 @@ func (r *Runner) RegenerateSummary(ctx context.Context, meetingID string) error 
 
 	r.updateMeetingStatus(meetingID, models.StatusDone)
 	r.broadcastStage(meetingID, "complete")
-	return nil
-}
-
-func (r *Runner) runTranscription(ctx context.Context, meetingID string) error {
-	meeting, err := r.store.GetMeeting(meetingID)
-	if err != nil {
-		return err
-	}
-
-	// Build transcription request
-	audioPaths := map[string]string{}
-	if meeting.MicPath != "" {
-		audioPaths["mic"] = meeting.MicPath
-	}
-	if meeting.SystemPath != "" {
-		audioPaths["system"] = meeting.SystemPath
-	}
-
-	if len(audioPaths) == 0 {
-		log.Printf("[pipeline] No audio paths for meeting %s, skipping transcription", meetingID)
-		return nil
-	}
-
-	userName, _ := r.store.GetSetting("user_name")
-	if userName == "" {
-		userName = "User"
-	}
-
-	modelSize, _ := r.store.GetSetting("whisper_model_size")
-	if modelSize == "" {
-		modelSize = "base"
-	}
-
-	language, _ := r.store.GetSetting("language")
-
-	// Load known speaker names for identification
-	profiles, _ := r.store.ListSpeakerProfiles()
-	knownSpeakers := make([]string, 0, len(profiles))
-	for _, p := range profiles {
-		knownSpeakers = append(knownSpeakers, p.Name)
-	}
-
-	req := &transcriber.TranscriptionRequest{
-		AudioPaths:    audioPaths,
-		UserName:      userName,
-		Language:      language,
-		ModelSize:     modelSize,
-		KnownSpeakers: knownSpeakers,
-	}
-
-	resp, err := r.transcriber.Transcribe(ctx, req)
-	if err != nil {
-		return err
-	}
-
-	transcriptJSON, err := json.Marshal(resp)
-	if err != nil {
-		return err
-	}
-
-	meeting.TranscriptJSON = string(transcriptJSON)
-	meeting.SpeakerCount = len(resp.Speakers)
-	if err := r.store.UpdateMeeting(meeting); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -196,7 +277,6 @@ func (r *Runner) runSummarization(ctx context.Context, meetingID string) error {
 		return fmt.Errorf("no transcript to summarize")
 	}
 
-	// Parse transcript to extract segments for the prompt
 	var transcriptData struct {
 		Segments []struct {
 			Speaker string  `json:"speaker"`
@@ -209,7 +289,6 @@ func (r *Runner) runSummarization(ctx context.Context, meetingID string) error {
 		return fmt.Errorf("parse transcript: %w", err)
 	}
 
-	// Format transcript as readable text
 	transcript := formatTranscript(transcriptData.Segments)
 	if transcript == "" {
 		return fmt.Errorf("empty transcript")
@@ -226,7 +305,6 @@ func (r *Runner) runSummarization(ctx context.Context, meetingID string) error {
 	}
 
 	meeting.SummaryJSON = string(summaryJSON)
-	// Update title if Claude provided one
 	if summary.Title != "" {
 		meeting.Title = summary.Title
 	}

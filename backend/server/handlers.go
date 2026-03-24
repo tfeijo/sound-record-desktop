@@ -51,7 +51,15 @@ func (h *Handlers) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// startRecordingRequest provides audio file paths so streaming transcription
+// can begin immediately when recording starts.
+type startRecordingRequest struct {
+	MicPath    string `json:"micPath"`
+	SystemPath string `json:"systemPath"`
+}
+
 // StartRecording handles POST /api/recording/start.
+// Starts streaming transcription in the background if audio paths are provided.
 func (h *Handlers) StartRecording(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -63,6 +71,11 @@ func (h *Handlers) StartRecording(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var body startRecordingRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+
 	meetingID := uuid.New().String()
 	now := time.Now().UTC()
 
@@ -72,6 +85,8 @@ func (h *Handlers) StartRecording(w http.ResponseWriter, r *http.Request) {
 		Date:      now.Format("2006-01-02"),
 		StartTime: &now,
 		Status:    models.StatusRecording,
+		MicPath:   body.MicPath,
+		SystemPath: body.SystemPath,
 	}
 	if err := h.Store.CreateMeeting(m); err != nil {
 		log.Printf("Error creating meeting: %v", err)
@@ -82,7 +97,14 @@ func (h *Handlers) StartRecording(w http.ResponseWriter, r *http.Request) {
 	h.state = "recording"
 	h.meetingID = meetingID
 
-	// Broadcast recording started via WebSocket
+	// Start streaming transcription in background
+	if body.MicPath != "" || body.SystemPath != "" {
+		if err := h.Pipeline.StartStreaming(h.AppCtx, meetingID, body.MicPath, body.SystemPath); err != nil {
+			log.Printf("[handler] Failed to start streaming transcription: %v", err)
+			// Non-fatal: recording continues, transcription will be attempted at finalize
+		}
+	}
+
 	h.Hub.Broadcast(Message{
 		Type: "recording:started",
 		Payload: map[string]string{
@@ -104,8 +126,8 @@ type stopRecordingRequest struct {
 }
 
 // StopRecording handles POST /api/recording/stop.
+// Finalizes the streaming transcript and triggers summarization pipeline.
 func (h *Handlers) StopRecording(w http.ResponseWriter, r *http.Request) {
-	// Parse optional body with file paths from Tauri
 	var body stopRecordingRequest
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&body)
@@ -113,9 +135,14 @@ func (h *Handlers) StopRecording(w http.ResponseWriter, r *http.Request) {
 
 	meetingID, hasAudio := h.stopRecordingLocked(body)
 
-	// Trigger transcription pipeline in background (outside the lock)
-	if meetingID != "" && hasAudio {
-		h.Pipeline.RunAfterRecording(h.AppCtx, meetingID)
+	if meetingID != "" {
+		if hasAudio {
+			// Finalize streaming transcription and run post-processing pipeline
+			h.Pipeline.FinalizeAndProcess(h.AppCtx, meetingID)
+		} else if h.Pipeline.IsStreaming() {
+			// No audio paths but streaming was started — clean up
+			h.Pipeline.StopStreaming()
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
@@ -142,8 +169,15 @@ func (h *Handlers) stopRecordingLocked(body stopRecordingRequest) (string, bool)
 			} else if meeting.StartTime != nil {
 				meeting.DurationSeconds = int(now.Sub(*meeting.StartTime).Seconds())
 			}
-			meeting.MicPath = body.MicPath
-			meeting.SystemPath = body.SystemPath
+			// Only overwrite paths if stop body provides them (start may have set them already)
+			if body.MicPath != "" {
+				meeting.MicPath = body.MicPath
+			}
+			if body.SystemPath != "" {
+				meeting.SystemPath = body.SystemPath
+			}
+			// Check stored paths, not just stop body
+			hasAudio = meeting.MicPath != "" || meeting.SystemPath != ""
 			if hasAudio {
 				meeting.Status = models.StatusTranscribing
 			} else {
@@ -325,12 +359,10 @@ func (h *Handlers) AutoStopRecording() {
 		return
 	}
 
-	// Note: stopRecordingLocked receives empty paths because Tauri/Rust manages
-	// audio file paths. It will update the meeting via the Tauri stop flow.
 	meetingID, hasAudio := h.stopRecordingLocked(stopRecordingRequest{})
 
 	if meetingID != "" && hasAudio {
-		h.Pipeline.RunAfterRecording(h.AppCtx, meetingID)
+		h.Pipeline.FinalizeAndProcess(h.AppCtx, meetingID)
 	}
 
 	log.Printf("[meetdetect] Auto-stopped recording for meeting %s", meetingID)
