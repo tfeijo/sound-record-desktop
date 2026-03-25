@@ -26,12 +26,6 @@ async function getTauriInvoke(): Promise<
   }
 }
 
-interface StopRecordingResult {
-  micPath: string;
-  systemPath: string;
-  durationSecs: number;
-}
-
 export function useRecording() {
   const state = useRecordingStore((s) => s.state);
   const duration = useRecordingStore((s) => s.duration);
@@ -68,24 +62,23 @@ export function useRecording() {
       const s = store.getState();
       s.setError(null);
 
-      // 1. Call Go API to create meeting in DB
-      const res = await api.startRecording();
-      s.setMeetingId(res.meetingId);
-      s.setState("recording");
-
-      // 2. Start Tauri audio capture (if running inside Tauri)
       const invoke = await getTauriInvoke();
       if (invoke) {
-        try {
-          await invoke("start_recording", { meetingId: res.meetingId });
-          console.log("[Tauri] Audio capture started for meeting", res.meetingId);
-        } catch (tauriErr) {
-          const errMsg = tauriErr instanceof Error ? tauriErr.message : String(tauriErr);
-          console.error("[Tauri] start_recording failed:", errMsg);
-          s.setError(`Audio capture failed: ${errMsg}`);
-        }
+        // Tauri orchestrates everything: audio capture + Go backend
+        const result = (await invoke("start_recording")) as {
+          meetingId: string;
+          micPath: string;
+          systemPath: string;
+        };
+        s.setMeetingId(result.meetingId);
+        s.setState("recording");
+        console.log("[Tauri] Recording started:", result.meetingId);
       } else {
-        console.warn("[Tauri] Not in Tauri context, audio capture skipped");
+        // Browser fallback: call Go API directly (no audio capture)
+        const res = await api.startRecording();
+        s.setMeetingId(res.meetingId);
+        s.setState("recording");
+        console.warn("[Browser] Recording started without audio capture");
       }
     } catch (err) {
       store
@@ -96,25 +89,14 @@ export function useRecording() {
 
   const stopRecording = useCallback(async () => {
     try {
-      let stopBody: api.StopRecordingBody | undefined;
-
-      // 1. Stop Tauri audio capture first (if running inside Tauri)
       const invoke = await getTauriInvoke();
       if (invoke) {
-        try {
-          const result = (await invoke("stop_recording")) as StopRecordingResult;
-          stopBody = {
-            micPath: result.micPath,
-            systemPath: result.systemPath,
-            duration: result.durationSecs,
-          };
-        } catch (tauriErr) {
-          console.warn("Tauri stop_recording failed:", tauriErr);
-        }
+        // Tauri orchestrates everything: stop audio + notify Go backend
+        await invoke("stop_recording");
+      } else {
+        // Browser fallback
+        await api.stopRecording();
       }
-
-      // 2. Call Go API with file paths so it can update the meeting record
-      await api.stopRecording(stopBody);
 
       const s = store.getState();
       s.setState("idle");

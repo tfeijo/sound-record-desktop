@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["time"] }
 cpal = "0.15"
 hound = "3.5"
 dirs = "5"
+uuid = { version = "1", features = ["v4"] }
 
 [lib]
 name = "meetnotes_lib"

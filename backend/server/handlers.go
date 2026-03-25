@@ -54,6 +54,7 @@ func (h *Handlers) HealthCheck(w http.ResponseWriter, r *http.Request) {
 // startRecordingRequest provides audio file paths so streaming transcription
 // can begin immediately when recording starts.
 type startRecordingRequest struct {
+	MeetingID  string `json:"meetingId"`
 	MicPath    string `json:"micPath"`
 	SystemPath string `json:"systemPath"`
 }
@@ -76,7 +77,11 @@ func (h *Handlers) StartRecording(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 
-	meetingID := uuid.New().String()
+	// Use Tauri-provided meeting ID, or generate one for backward compat
+	meetingID := body.MeetingID
+	if meetingID == "" {
+		meetingID = uuid.New().String()
+	}
 	now := time.Now().UTC()
 
 	m := &models.Meeting{
