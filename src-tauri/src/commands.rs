@@ -56,17 +56,27 @@ pub async fn start_recording(
     backend: State<'_, BackendClient>,
     app: tauri::AppHandle,
 ) -> Result<StartRecordingResult, String> {
+    // Set is_recording immediately to prevent duplicate starts during async operations
     {
-        let is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
+        let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
         if *is_recording {
             return Err("Already recording".to_string());
         }
+        *is_recording = true;
     }
 
     let meeting_id = uuid::Uuid::new_v4().to_string();
 
     // 1. Start audio capture (gets file paths)
-    let audio_result = capture.start_recording(app.clone(), meeting_id.clone())?;
+    let audio_result = match capture.start_recording(app.clone(), meeting_id.clone()) {
+        Ok(result) => result,
+        Err(e) => {
+            // Rollback recording state on audio capture failure
+            let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
+            *is_recording = false;
+            return Err(e);
+        }
+    };
 
     // 2. Notify Go backend — creates meeting in DB + starts streaming transcription
     let backend_result = backend
@@ -82,12 +92,9 @@ pub async fn start_recording(
         // Non-fatal: audio still records, transcription will be attempted at stop
     }
 
-    // 3. Update recording state
+    // 3. Track recording start time
     {
-        let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
-        *is_recording = true;
-    }
-    if let Ok(mut started) = state.started_at.lock() {
+        let mut started = state.started_at.lock().map_err(|e| e.to_string())?;
         *started = Some(Instant::now());
     }
 
@@ -114,32 +121,28 @@ pub async fn stop_recording(
     backend: State<'_, BackendClient>,
     app: tauri::AppHandle,
 ) -> Result<StopRecordingResult, String> {
+    // Set is_recording = false immediately to prevent duplicate stops during async operations
     {
-        let is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
+        let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
         if !*is_recording {
             return Err("Not recording".to_string());
         }
+        *is_recording = false;
     }
 
     // Calculate duration
     let duration_secs = state
         .started_at
         .lock()
-        .ok()
-        .and_then(|mut s| s.take())
+        .map_err(|e| e.to_string())?
+        .take()
         .map(|t| t.elapsed().as_secs())
         .unwrap_or(0);
 
     // 1. Stop audio capture
     let result = capture.stop_recording(&app)?;
 
-    // 2. Update recording state
-    {
-        let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
-        *is_recording = false;
-    }
-
-    // 3. Notify Go backend — finalizes streaming + starts post-processing pipeline
+    // 2. Notify Go backend — finalizes streaming + starts post-processing pipeline
     let backend_result = backend
         .stop_recording(crate::backend_client::StopRecordingRequest {
             mic_path: result.mic_path.clone(),
@@ -172,8 +175,9 @@ pub fn get_recording_status(state: State<'_, RecordingState>) -> Result<Recordin
     let duration_secs = state
         .started_at
         .lock()
-        .ok()
-        .and_then(|s| s.as_ref().map(|t| t.elapsed().as_secs()))
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .map(|t| t.elapsed().as_secs())
         .unwrap_or(0);
     Ok(RecordingStatus {
         is_recording: *is_recording,
