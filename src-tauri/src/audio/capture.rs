@@ -27,6 +27,18 @@ struct RecordingStoppedPayload {
     system_path: String,
 }
 
+/// Result returned from start_recording containing file paths.
+pub struct StartResult {
+    pub mic_path: String,
+    pub system_path: String,
+}
+
+impl std::fmt::Display for StartResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "mic: {}, system: {}", self.mic_path, self.system_path)
+    }
+}
+
 /// Result returned from stop_recording containing file paths.
 pub struct StopResult {
     pub mic_path: String,
@@ -57,13 +69,18 @@ impl AudioCapture {
     }
 
     /// Start recording both microphone and system audio for a given meeting.
-    pub fn start_recording(&self, app_handle: AppHandle, meeting_id: String) -> Result<(), String> {
+    /// Returns a StartResult with the file paths for mic and system audio.
+    pub fn start_recording(&self, app_handle: AppHandle, meeting_id: String) -> Result<StartResult, String> {
         let recordings_dir = recordings_directory()?;
         fs::create_dir_all(&recordings_dir)
             .map_err(|e| format!("Failed to create recordings directory: {e}"))?;
 
         let mic_path = recordings_dir.join(format!("meeting_{}_mic.wav", meeting_id));
         let system_path = recordings_dir.join(format!("meeting_{}_system.wav", meeting_id));
+
+        // Capture path strings before PathBufs are moved into recorders
+        let mic_path_str = mic_path.to_string_lossy().to_string();
+        let system_path_str = system_path.to_string_lossy().to_string();
 
         // Store meeting_id
         {
@@ -122,7 +139,10 @@ impl AudioCapture {
         );
 
         log::info!("AudioCapture: recording started for meeting {}", meeting_id);
-        Ok(())
+        Ok(StartResult {
+            mic_path: mic_path_str,
+            system_path: system_path_str,
+        })
     }
 
     /// Stop the current recording and return file paths for both mic and system audio.

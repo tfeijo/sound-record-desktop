@@ -5,12 +5,22 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::audio::capture::AudioCapture;
+use crate::backend_client::BackendClient;
 
 /// Recording status returned by get_recording_status
 #[derive(Clone, Serialize)]
 pub struct RecordingStatus {
     pub is_recording: bool,
     pub duration_secs: u64,
+}
+
+/// Result of starting a recording, returned to the frontend.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartRecordingResult {
+    pub meeting_id: String,
+    pub mic_path: String,
+    pub system_path: String,
 }
 
 /// Result of stopping a recording, returned to the frontend.
@@ -37,48 +47,78 @@ impl RecordingState {
     }
 }
 
-/// Start a recording session
+/// Start a recording session.
+/// Orchestrates: generate ID -> start audio capture -> notify Go backend with paths.
 #[tauri::command]
-pub fn start_recording(
+pub async fn start_recording(
     state: State<'_, RecordingState>,
     capture: State<'_, AudioCapture>,
+    backend: State<'_, BackendClient>,
     app: tauri::AppHandle,
-    meeting_id: Option<String>,
-) -> Result<(), String> {
-    let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
-    if *is_recording {
-        return Err("Already recording".to_string());
+) -> Result<StartRecordingResult, String> {
+    {
+        let is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
+        if *is_recording {
+            return Err("Already recording".to_string());
+        }
     }
 
-    let id = meeting_id.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis().to_string())
-            .unwrap_or_else(|_| "unknown".to_string())
-    });
+    let meeting_id = uuid::Uuid::new_v4().to_string();
 
-    capture.start_recording(app, id)?;
-    *is_recording = true;
+    // 1. Start audio capture (gets file paths)
+    let audio_result = capture.start_recording(app.clone(), meeting_id.clone())?;
 
-    // Track when recording started for duration calculation
+    // 2. Notify Go backend — creates meeting in DB + starts streaming transcription
+    let backend_result = backend
+        .start_recording(crate::backend_client::StartRecordingRequest {
+            meeting_id: meeting_id.clone(),
+            mic_path: audio_result.mic_path.clone(),
+            system_path: audio_result.system_path.clone(),
+        })
+        .await;
+
+    if let Err(e) = &backend_result {
+        log::error!("Go backend start_recording failed: {}. Audio capture continues.", e);
+        // Non-fatal: audio still records, transcription will be attempted at stop
+    }
+
+    // 3. Update recording state
+    {
+        let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
+        *is_recording = true;
+    }
     if let Ok(mut started) = state.started_at.lock() {
         *started = Some(Instant::now());
     }
 
-    log::info!("Recording started");
-    Ok(())
+    log::info!(
+        "Recording started: meeting={}, mic={}, system={}",
+        meeting_id,
+        audio_result.mic_path,
+        audio_result.system_path
+    );
+
+    Ok(StartRecordingResult {
+        meeting_id,
+        mic_path: audio_result.mic_path,
+        system_path: audio_result.system_path,
+    })
 }
 
-/// Stop a recording session and return file paths + duration.
+/// Stop a recording session.
+/// Orchestrates: stop audio capture -> notify Go backend with paths + duration.
 #[tauri::command]
-pub fn stop_recording(
+pub async fn stop_recording(
     state: State<'_, RecordingState>,
     capture: State<'_, AudioCapture>,
+    backend: State<'_, BackendClient>,
     app: tauri::AppHandle,
 ) -> Result<StopRecordingResult, String> {
-    let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
-    if !*is_recording {
-        return Err("Not recording".to_string());
+    {
+        let is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
+        if !*is_recording {
+            return Err("Not recording".to_string());
+        }
     }
 
     // Calculate duration
@@ -90,10 +130,33 @@ pub fn stop_recording(
         .map(|t| t.elapsed().as_secs())
         .unwrap_or(0);
 
+    // 1. Stop audio capture
     let result = capture.stop_recording(&app)?;
-    *is_recording = false;
 
-    log::info!("Recording stopped, result: {}", result);
+    // 2. Update recording state
+    {
+        let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
+        *is_recording = false;
+    }
+
+    // 3. Notify Go backend — finalizes streaming + starts post-processing pipeline
+    let backend_result = backend
+        .stop_recording(crate::backend_client::StopRecordingRequest {
+            mic_path: result.mic_path.clone(),
+            system_path: result.system_path.clone(),
+            duration: duration_secs,
+        })
+        .await;
+
+    if let Err(e) = &backend_result {
+        log::error!("Go backend stop_recording failed: {}", e);
+    }
+
+    log::info!(
+        "Recording stopped: mic={}, system={}",
+        result.mic_path,
+        result.system_path
+    );
 
     Ok(StopRecordingResult {
         mic_path: result.mic_path,

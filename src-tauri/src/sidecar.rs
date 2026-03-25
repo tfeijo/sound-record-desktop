@@ -5,8 +5,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
-/// Default port used by the MeetNotes backend
-const DEFAULT_PORT: u16 = 9876;
+use crate::backend_client::BACKEND_PORT;
 
 /// Maximum time to wait for the backend health check (in seconds)
 const HEALTH_CHECK_TIMEOUT_SECS: u64 = 30;
@@ -129,7 +128,7 @@ async fn poll_health_check() -> Result<(), String> {
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-    let url = format!("http://localhost:{}/health", DEFAULT_PORT);
+    let url = format!("http://localhost:{}/health", BACKEND_PORT);
     let max_attempts = (HEALTH_CHECK_TIMEOUT_SECS * 1000) / HEALTH_CHECK_INTERVAL_MS;
 
     for attempt in 1..=max_attempts {

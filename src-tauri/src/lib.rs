@@ -1,4 +1,5 @@
 mod audio;
+mod backend_client;
 mod commands;
 mod sidecar;
 mod tray;
@@ -12,6 +13,7 @@ pub fn run() {
         .manage(sidecar::SidecarState::new())
         .manage(commands::RecordingState::new())
         .manage(audio::capture::AudioCapture::new().expect("Failed to initialize AudioCapture"))
+        .manage(backend_client::BackendClient::new())
         .invoke_handler(tauri::generate_handler![
             commands::start_recording,
             commands::stop_recording,
