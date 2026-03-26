@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 @main
 struct MeetNotesApp: App {
@@ -7,5 +8,10 @@ struct MeetNotesApp: App {
             ContentView()
         }
         .defaultSize(width: 900, height: 600)
+        .modelContainer(for: [
+            Meeting.self,
+            SpeakerProfile.self,
+            AppSettings.self,
+        ])
     }
 }
