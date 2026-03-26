@@ -11,12 +11,7 @@ let package = Package(
         .executableTarget(
             name: "MeetNotesApp",
             path: ".",
-            exclude: ["Package.swift", "Info.plist", "MeetNotes.entitlements"],
-            sources: [
-                "MeetNotesApp.swift",
-                "Views/ContentView.swift",
-                "Views/SidebarView.swift"
-            ]
+            exclude: ["Package.swift", "Info.plist", "MeetNotes.entitlements"]
         )
     ]
 )
