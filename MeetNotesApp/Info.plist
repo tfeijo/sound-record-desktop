@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>MeetNotes</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.meetnotes.app</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>MeetNotes needs microphone access to record meeting audio for transcription.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>MeetNotes uses speech recognition to transcribe meeting audio in real time.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>MeetNotes uses Apple Events to detect active meeting applications.</string>
+</dict>
+</plist>
