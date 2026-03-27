@@ -386,7 +386,7 @@ struct WorkspaceView: View {
         do {
             try modelContext.save()
         } catch {
-            audioEngine.error = "Failed to save diarization: \(error.localizedDescription)"
+            speakerEngine.error = "Failed to save diarization: \(error.localizedDescription)"
         }
     }
 

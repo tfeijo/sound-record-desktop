@@ -276,7 +276,7 @@ private struct StatusBadge: View {
         case .transcribing:
             return "Transcribing"
         case .diarizing:
-            return "Diarizing"
+            return "Identifying Speakers"
         case .summarizing:
             return "Summarizing"
         case .done:

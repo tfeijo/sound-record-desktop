@@ -1,3 +1,4 @@
+import Accelerate
 @preconcurrency import AVFoundation
 import Foundation
 import Observation
@@ -5,12 +6,13 @@ import Observation
 // MARK: - Speaker Embedding
 
 /// A 192-dimensional speaker voice embedding vector.
-struct SpeakerEmbedding {
+struct SpeakerEmbedding: Sendable {
     let vector: [Float]  // 192-dim ECAPA-TDNN output
 
     static let dimensions = 192
 
     /// Cosine similarity between two embedding vectors. Returns value in [-1, 1].
+    /// Uses Accelerate framework for vectorized computation.
     func cosineSimilarity(to other: SpeakerEmbedding) -> Float {
         guard vector.count == other.vector.count, !vector.isEmpty else { return 0 }
 
@@ -18,11 +20,9 @@ struct SpeakerEmbedding {
         var normA: Float = 0
         var normB: Float = 0
 
-        for i in 0..<vector.count {
-            dotProduct += vector[i] * other.vector[i]
-            normA += vector[i] * vector[i]
-            normB += other.vector[i] * other.vector[i]
-        }
+        vDSP_dotpr(vector, 1, other.vector, 1, &dotProduct, vDSP_Length(vector.count))
+        vDSP_svesq(vector, 1, &normA, vDSP_Length(vector.count))
+        vDSP_svesq(other.vector, 1, &normB, vDSP_Length(other.vector.count))
 
         let denominator = sqrtf(normA) * sqrtf(normB)
         guard denominator > 0 else { return 0 }
@@ -33,7 +33,7 @@ struct SpeakerEmbedding {
 // MARK: - Diarization Result
 
 /// Result of speaker diarization containing updated segments and speaker count.
-struct DiarizationResult {
+struct DiarizationResult: Sendable {
     let segments: [TranscriptSegment]
     let speakerCount: Int
 }
@@ -49,7 +49,7 @@ struct DiarizationResult {
 ///    longer than 500ms, and assigns speaker changes at those boundaries.
 ///
 /// The energy-based fallback is the working default since the CoreML model is not bundled
-/// in SPM builds.
+/// in SPM builds. Heavy computation runs off the main thread via a detached Task.
 @MainActor @Observable
 final class SpeakerEngine {
     // MARK: - Published State
@@ -60,26 +60,11 @@ final class SpeakerEngine {
     /// Whether a CoreML speaker embedding model is available.
     private(set) var coreMLAvailable = false
 
-    // MARK: - Configuration
-
-    /// Cosine similarity threshold for agglomerative clustering.
-    /// Embeddings with similarity above this threshold are merged into the same speaker cluster.
-    private let clusteringThreshold: Float = 0.7
-
-    /// Minimum silence gap (in seconds) to trigger a speaker change in energy-based fallback.
-    private let silenceGapThreshold: Double = 0.5
-
-    /// RMS energy threshold below which audio is considered silence.
-    private let silenceEnergyThreshold: Float = 0.01
-
-    /// Sample rate expected for the input WAV file (matches AudioEngine output).
-    private let expectedSampleRate: Double = 16_000
-
     // MARK: - Initialization
 
     init() {
         // Attempt to load CoreML model (graceful failure expected in SPM builds)
-        coreMLAvailable = loadCoreMLModel()
+        coreMLAvailable = Self.loadCoreMLModel()
     }
 
     // MARK: - Public API
@@ -88,11 +73,7 @@ final class SpeakerEngine {
     ///
     /// If a CoreML ECAPA-TDNN model is available, extracts speaker embeddings and clusters them.
     /// Otherwise, falls back to energy-based silence detection for speaker turn boundaries.
-    ///
-    /// - Parameters:
-    ///   - segments: Transcript segments from whisper.cpp (or live transcription).
-    ///   - audioPath: File path to the 16kHz mono WAV recording.
-    /// - Returns: A `DiarizationResult` with updated segments containing speaker labels.
+    /// Heavy computation runs on a background thread.
     func diarize(segments: [TranscriptSegment], audioPath: String) async -> DiarizationResult {
         guard !segments.isEmpty else {
             return DiarizationResult(segments: segments, speakerCount: 0)
@@ -100,20 +81,28 @@ final class SpeakerEngine {
 
         isProcessing = true
         error = nil
-        defer { isProcessing = false }
 
-        if coreMLAvailable {
-            return await diarizeWithCoreML(segments: segments, audioPath: audioPath)
-        } else {
-            return await diarizeWithEnergyFallback(segments: segments, audioPath: audioPath)
-        }
+        let useCoreML = coreMLAvailable
+
+        // Run heavy computation off the main thread
+        let result = await Task.detached {
+            let worker = DiarizationWorker()
+            if useCoreML {
+                return worker.diarizeWithCoreML(segments: segments, audioPath: audioPath)
+            } else {
+                return worker.diarizeWithEnergyFallback(segments: segments, audioPath: audioPath)
+            }
+        }.value
+
+        isProcessing = false
+        return result
     }
 
-    // MARK: - CoreML Path (Architecture Ready)
+    // MARK: - CoreML Model Loading
 
     /// Attempt to load the CoreML ECAPA-TDNN model.
     /// Returns false when model file is not bundled (expected in SPM builds).
-    private func loadCoreMLModel() -> Bool {
+    private static func loadCoreMLModel() -> Bool {
         // CoreML ECAPA-TDNN model would be loaded here.
         // The model file (ECAPA_TDNN.mlmodelc) is not included in SPM builds.
         // When available, it would be loaded with:
@@ -125,27 +114,35 @@ final class SpeakerEngine {
         // For now, gracefully return false to use energy-based fallback.
         return false
     }
+}
 
-    /// Extract a 192-dim speaker embedding from an audio segment using CoreML.
-    /// Stub implementation — returns nil until model is available.
-    private func extractEmbedding(audioSamples _: [Float]) -> SpeakerEmbedding? {
-        // When CoreML model is available:
-        // 1. Convert audio samples to MLMultiArray
-        // 2. Run inference with MLComputeUnits.all
-        // 3. Extract 192-dim output vector
-        // 4. Return SpeakerEmbedding(vector: outputVector)
-        return nil
-    }
+// MARK: - Diarization Worker (Off Main Thread)
+
+/// Pure computation worker for speaker diarization. Runs on background threads.
+/// Separated from SpeakerEngine (@MainActor) to avoid blocking the UI.
+private struct DiarizationWorker: Sendable {
+    /// Cosine similarity threshold for agglomerative clustering.
+    let clusteringThreshold: Float = 0.7
+
+    /// Minimum silence gap (in seconds) to trigger a speaker change.
+    let silenceGapThreshold: Double = 0.5
+
+    /// RMS energy threshold below which audio is considered silence.
+    let silenceEnergyThreshold: Float = 0.01
+
+    /// Expected sample rate for the input WAV file (matches AudioEngine output).
+    let expectedSampleRate: Double = 16_000
+
+    // MARK: - CoreML Path (Architecture Ready)
 
     /// CoreML-based diarization: extract embeddings per segment, then cluster.
-    private func diarizeWithCoreML(
+    func diarizeWithCoreML(
         segments: [TranscriptSegment],
         audioPath: String
-    ) async -> DiarizationResult {
-        // Load audio samples
+    ) -> DiarizationResult {
+        // Load audio samples; degrade gracefully if loading fails
         guard let audioSamples = loadAudioSamples(from: audioPath) else {
-            error = "Failed to load audio for CoreML diarization"
-            return DiarizationResult(segments: segments, speakerCount: 0)
+            return fallbackSingleSpeaker(segments: segments)
         }
 
         // Extract embeddings for each segment
@@ -155,7 +152,6 @@ final class SpeakerEngine {
             let endSample = min(Int(segment.end * expectedSampleRate), audioSamples.count)
 
             guard startSample < endSample, startSample < audioSamples.count else {
-                // Use a zero embedding for segments outside audio range
                 embeddings.append(SpeakerEmbedding(vector: [Float](repeating: 0, count: SpeakerEmbedding.dimensions)))
                 continue
             }
@@ -168,11 +164,19 @@ final class SpeakerEngine {
             }
         }
 
-        // Cluster embeddings using agglomerative clustering
         let clusterLabels = agglomerativeClustering(embeddings: embeddings)
-
-        // Assign speaker labels
         return assignSpeakerLabels(segments: segments, clusterLabels: clusterLabels)
+    }
+
+    /// Extract a 192-dim speaker embedding from audio samples using CoreML.
+    /// Stub — returns nil until model is available.
+    private func extractEmbedding(audioSamples _: [Float]) -> SpeakerEmbedding? {
+        // When CoreML model is available:
+        // 1. Convert audio samples to MLMultiArray
+        // 2. Run inference with MLComputeUnits.all
+        // 3. Extract 192-dim output vector
+        // 4. Return SpeakerEmbedding(vector: outputVector)
+        return nil
     }
 
     // MARK: - Agglomerative Clustering
@@ -182,19 +186,15 @@ final class SpeakerEngine {
     /// Each embedding starts in its own cluster. At each step, the two most similar
     /// clusters are merged if their similarity exceeds `clusteringThreshold`.
     /// Uses average-linkage to compute inter-cluster similarity.
-    ///
-    /// - Parameter embeddings: Array of speaker embeddings to cluster.
-    /// - Returns: Array of cluster labels (0-based) aligned with the input embeddings.
-    func agglomerativeClustering(embeddings: [SpeakerEmbedding]) -> [Int] {
+    private func agglomerativeClustering(embeddings: [SpeakerEmbedding]) -> [Int] {
         let n = embeddings.count
         guard n > 0 else { return [] }
         if n == 1 { return [0] }
 
-        // Each element starts in its own cluster
         var clusterAssignment = Array(0..<n)
         var nextClusterID = n
 
-        // Precompute pairwise similarity matrix (upper triangle)
+        // Precompute pairwise similarity matrix
         var similarityMatrix = [[Float]](repeating: [Float](repeating: 0, count: n), count: n)
         for i in 0..<n {
             for j in (i + 1)..<n {
@@ -204,16 +204,12 @@ final class SpeakerEngine {
             }
         }
 
-        // Track which cluster IDs are active
         var activeClusters = Set(0..<n)
-
-        // Map from cluster ID to member indices
         var clusterMembers: [Int: [Int]] = [:]
         for i in 0..<n {
             clusterMembers[i] = [i]
         }
 
-        // Iteratively merge the most similar pair of clusters
         while activeClusters.count > 1 {
             var bestSim: Float = -1
             var bestPair: (Int, Int) = (-1, -1)
@@ -224,7 +220,6 @@ final class SpeakerEngine {
                     let clusterA = activeList[i]
                     let clusterB = activeList[j]
 
-                    // Average-linkage: mean similarity between all pairs
                     let membersA = clusterMembers[clusterA]!
                     let membersB = clusterMembers[clusterB]!
                     var totalSim: Float = 0
@@ -242,22 +237,16 @@ final class SpeakerEngine {
                 }
             }
 
-            // Stop merging if best similarity is below threshold
-            if bestSim < clusteringThreshold {
-                break
-            }
+            if bestSim < clusteringThreshold { break }
 
-            // Merge bestPair into a new cluster
             let (clusterA, clusterB) = bestPair
             let mergedMembers = clusterMembers[clusterA]! + clusterMembers[clusterB]!
             clusterMembers[nextClusterID] = mergedMembers
 
-            // Update assignments
             for idx in mergedMembers {
                 clusterAssignment[idx] = nextClusterID
             }
 
-            // Update active clusters
             activeClusters.remove(clusterA)
             activeClusters.remove(clusterB)
             activeClusters.insert(nextClusterID)
@@ -267,7 +256,7 @@ final class SpeakerEngine {
             nextClusterID += 1
         }
 
-        // Remap cluster IDs to sequential 0-based labels
+        // Remap to sequential 0-based labels
         var clusterMap: [Int: Int] = [:]
         var nextLabel = 0
         var result = [Int]()
@@ -290,28 +279,22 @@ final class SpeakerEngine {
     /// Energy-based speaker turn detection using silence gaps.
     ///
     /// Reads the WAV audio file, computes RMS energy in short windows, and identifies
-    /// silence gaps longer than 500ms. Speaker changes are assumed at these gaps.
-    /// This provides a reasonable baseline when CoreML embeddings are unavailable.
-    private func diarizeWithEnergyFallback(
+    /// silence gaps longer than 500ms. Speaker changes are assumed at those gaps.
+    /// This is the working default when CoreML embeddings are unavailable.
+    ///
+    /// **Known limitation:** Speaker cycling is round-robin (1→2→3→1...) since energy
+    /// alone cannot re-identify a previous speaker. This means the same physical speaker
+    /// may get different labels if they speak non-consecutively.
+    func diarizeWithEnergyFallback(
         segments: [TranscriptSegment],
         audioPath: String
-    ) async -> DiarizationResult {
-        // Load audio samples for energy analysis
+    ) -> DiarizationResult {
         guard let audioSamples = loadAudioSamples(from: audioPath) else {
-            // If audio loading fails, assign all segments to Speaker 1
-            error = "Failed to load audio for energy analysis; assigning single speaker"
-            let updated = segments.map { segment in
-                var s = segment
-                s.speaker = "Speaker 1"
-                return s
-            }
-            return DiarizationResult(segments: updated, speakerCount: 1)
+            return fallbackSingleSpeaker(segments: segments)
         }
 
-        // Detect silence gaps in the audio
         let silenceGaps = detectSilenceGaps(in: audioSamples, sampleRate: expectedSampleRate)
 
-        // Assign speaker labels based on silence gaps between segments
         var currentSpeaker = 1
         var updatedSegments = [TranscriptSegment]()
 
@@ -319,22 +302,17 @@ final class SpeakerEngine {
             var updated = segment
 
             if index == 0 {
-                // First segment is always Speaker 1
                 updated.speaker = "Speaker 1"
             } else {
-                let previousEnd = segments[index - 1].end
-                let currentStart = segment.start
-                let gapStart = previousEnd
-                let gapEnd = currentStart
+                let gapStart = segments[index - 1].end
+                let gapEnd = segment.start
 
-                // Check if any silence gap falls between the previous and current segment
+                // Check if any silence gap overlaps with the inter-segment gap
                 let hasSilenceGap = silenceGaps.contains { gap in
-                    gap.start >= gapStart - 0.1 && gap.end <= gapEnd + 0.1
-                        && gap.duration >= silenceGapThreshold
+                    gap.start < gapEnd + 0.1 && gap.end > gapStart - 0.1
                 }
 
                 if hasSilenceGap {
-                    // Speaker change detected at silence gap
                     currentSpeaker = (currentSpeaker % maxSpeakers(for: segments.count)) + 1
                 }
 
@@ -350,7 +328,6 @@ final class SpeakerEngine {
 
     /// Determine a reasonable max speaker count based on segment count.
     private func maxSpeakers(for segmentCount: Int) -> Int {
-        // Heuristic: cap at a reasonable number based on meeting size
         if segmentCount <= 4 { return 2 }
         if segmentCount <= 10 { return 3 }
         return 4
@@ -358,19 +335,12 @@ final class SpeakerEngine {
 
     // MARK: - Silence Detection
 
-    /// A detected silence gap in the audio.
-    struct SilenceGap {
+    private struct SilenceGap {
         let start: Double   // seconds
         let end: Double     // seconds
-        var duration: Double { end - start }
     }
 
     /// Detect silence gaps in audio samples using windowed RMS energy.
-    ///
-    /// - Parameters:
-    ///   - samples: Float32 PCM audio samples.
-    ///   - sampleRate: Sample rate of the audio (e.g., 16000).
-    /// - Returns: Array of silence gaps sorted by start time.
     private func detectSilenceGaps(in samples: [Float], sampleRate: Double) -> [SilenceGap] {
         let windowSize = Int(sampleRate * 0.025)    // 25ms windows
         let hopSize = Int(sampleRate * 0.010)       // 10ms hop
@@ -378,7 +348,6 @@ final class SpeakerEngine {
 
         guard totalSamples > windowSize else { return [] }
 
-        // Compute RMS energy per window
         var isSilence = [Bool]()
         var windowTimes = [Double]()
         var offset = 0
@@ -396,7 +365,6 @@ final class SpeakerEngine {
             offset += hopSize
         }
 
-        // Find contiguous silence regions
         var gaps = [SilenceGap]()
         var silenceStart: Double?
 
@@ -416,7 +384,6 @@ final class SpeakerEngine {
             }
         }
 
-        // Handle trailing silence
         if let start = silenceStart, let lastTime = windowTimes.last {
             let end = lastTime + Double(windowSize) / sampleRate
             if end - start >= silenceGapThreshold {
@@ -429,7 +396,8 @@ final class SpeakerEngine {
 
     // MARK: - Audio Loading
 
-    /// Load audio samples from a WAV file as Float32 mono at the expected sample rate.
+    /// Load audio samples from a WAV file as Float32 mono at 16kHz.
+    /// Resamples automatically if the file has a different sample rate.
     private func loadAudioSamples(from path: String) -> [Float]? {
         let url = URL(fileURLWithPath: path)
 
@@ -440,34 +408,62 @@ final class SpeakerEngine {
         do {
             let audioFile = try AVAudioFile(forReading: url)
 
-            guard let format = AVAudioFormat(
+            guard let targetFormat = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32,
-                sampleRate: audioFile.processingFormat.sampleRate,
+                sampleRate: expectedSampleRate,
                 channels: 1,
                 interleaved: false
             ) else {
                 return nil
             }
 
-            let frameCount = AVAudioFrameCount(audioFile.length)
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            let ratio = expectedSampleRate / audioFile.processingFormat.sampleRate
+            let frameCount = AVAudioFrameCount(Double(audioFile.length) * ratio)
+            guard frameCount > 0,
+                  let buffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCount) else {
                 return nil
             }
 
-            try audioFile.read(into: buffer)
+            if audioFile.processingFormat.sampleRate != expectedSampleRate {
+                guard let converter = AVAudioConverter(
+                    from: audioFile.processingFormat,
+                    to: targetFormat
+                ) else { return nil }
+
+                let sourceFrameCount = AVAudioFrameCount(audioFile.length)
+                guard let sourceBuffer = AVAudioPCMBuffer(
+                    pcmFormat: audioFile.processingFormat,
+                    frameCapacity: sourceFrameCount
+                ) else { return nil }
+                try audioFile.read(into: sourceBuffer)
+
+                var hasProvidedData = false
+                var conversionError: NSError?
+                converter.convert(to: buffer, error: &conversionError) { _, outStatus in
+                    if hasProvidedData {
+                        outStatus.pointee = .endOfStream
+                        return nil
+                    }
+                    hasProvidedData = true
+                    outStatus.pointee = .haveData
+                    return sourceBuffer
+                }
+                guard conversionError == nil else { return nil }
+            } else {
+                try audioFile.read(into: buffer)
+            }
 
             guard let channelData = buffer.floatChannelData else { return nil }
-            let samples = Array(UnsafeBufferPointer(
+            return Array(UnsafeBufferPointer(
                 start: channelData[0],
                 count: Int(buffer.frameLength)
             ))
-            return samples
         } catch {
             return nil
         }
     }
 
-    // MARK: - Label Assignment
+    // MARK: - Helpers
 
     /// Assign "Speaker N" labels to segments based on cluster labels.
     private func assignSpeakerLabels(
@@ -487,5 +483,15 @@ final class SpeakerEngine {
 
         let uniqueSpeakers = Set(clusterLabels).count
         return DiarizationResult(segments: updatedSegments, speakerCount: uniqueSpeakers)
+    }
+
+    /// Fallback: assign all segments to Speaker 1 when audio loading fails.
+    private func fallbackSingleSpeaker(segments: [TranscriptSegment]) -> DiarizationResult {
+        let updated = segments.map { segment in
+            var s = segment
+            s.speaker = "Speaker 1"
+            return s
+        }
+        return DiarizationResult(segments: updated, speakerCount: 1)
     }
 }
