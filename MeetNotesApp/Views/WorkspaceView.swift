@@ -5,6 +5,7 @@ struct WorkspaceView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var audioEngine = AudioEngine()
     @State private var liveTranscriber = LiveTranscriber()
+    @State private var whisperTranscriber = WhisperTranscriber()
 
     /// Optional meeting passed in for viewing/resuming an existing meeting.
     var meeting: Meeting?
@@ -117,7 +118,7 @@ struct WorkspaceView: View {
 
     @ViewBuilder
     private var errorBanner: some View {
-        if let error = audioEngine.error ?? liveTranscriber.error {
+        if let error = audioEngine.error ?? liveTranscriber.error ?? whisperTranscriber.error {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.white)
@@ -129,6 +130,7 @@ struct WorkspaceView: View {
                 Button {
                     audioEngine.error = nil
                     liveTranscriber.error = nil
+                    whisperTranscriber.error = nil
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.white.opacity(0.8))
@@ -154,6 +156,43 @@ struct WorkspaceView: View {
             .padding(.vertical, 8)
             .background(Color.yellow.opacity(0.9))
         }
+
+        // Whisper transcription progress banner
+        if whisperTranscriber.isProcessing {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(whisperTranscriber.downloadManager.isDownloading
+                         ? "Downloading model..."
+                         : "Transcribing with whisper.cpp...")
+                        .font(.subheadline.weight(.medium))
+
+                    ProgressView(value: Double(whisperTranscriber.progress))
+                        .progressViewStyle(.linear)
+                        .tint(.orange)
+
+                    Text("\(Int(whisperTranscriber.progress * 100))%")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button {
+                    whisperTranscriber.cancel()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Cancel transcription")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.orange.opacity(0.1))
+        }
     }
 
     // MARK: - Computed
@@ -161,6 +200,10 @@ struct WorkspaceView: View {
     private var currentSegments: [TranscriptSegment] {
         if audioEngine.isRecording {
             return liveTranscriber.liveSegments
+        }
+        // While transcribing, keep showing live segments so UI isn't empty
+        if whisperTranscriber.isProcessing {
+            return activeMeeting?.transcript ?? []
         }
         return activeMeeting?.transcript ?? []
     }
@@ -210,7 +253,7 @@ struct WorkspaceView: View {
         }
 
         let elapsed = audioEngine.elapsedSeconds
-        let finalSegments = liveTranscriber.liveSegments
+        let liveSegments = liveTranscriber.liveSegments
 
         liveTranscriber.stop()
         audioEngine.stopRecording()
@@ -218,22 +261,55 @@ struct WorkspaceView: View {
         let descriptor = FetchDescriptor<Meeting>(
             predicate: #Predicate { $0.id == meetingID }
         )
-        if let savedMeeting = try? modelContext.fetch(descriptor).first {
-            savedMeeting.endTime = Date()
-            savedMeeting.durationSeconds = elapsed
-            savedMeeting.status = .done
-            savedMeeting.transcript = finalSegments
-            savedMeeting.title = meetingTitle
-            savedMeeting.updatedAt = Date()
-            activeMeeting = savedMeeting
-            do {
-                try modelContext.save()
-            } catch {
-                audioEngine.error = "Failed to update meeting: \(error.localizedDescription)"
-            }
+        guard let savedMeeting = try? modelContext.fetch(descriptor).first else { return }
+
+        // Save live transcript and transition to transcribing
+        savedMeeting.endTime = Date()
+        savedMeeting.durationSeconds = elapsed
+        savedMeeting.transcript = liveSegments
+        savedMeeting.title = meetingTitle
+        savedMeeting.status = .transcribing
+        savedMeeting.updatedAt = Date()
+        activeMeeting = savedMeeting
+        try? modelContext.save()
+
+        // Run whisper.cpp final transcription in background
+        let micPath = AudioEngine.micPath(for: meetingID)
+        Task {
+            await runWhisperTranscription(
+                meeting: savedMeeting,
+                audioPath: micPath,
+                liveSegments: liveSegments
+            )
+        }
+    }
+
+    /// Run whisper.cpp on the recorded audio, then update the meeting.
+    /// Falls back to keeping the live transcript if whisper returns no segments.
+    private func runWhisperTranscription(
+        meeting: Meeting,
+        audioPath: String,
+        liveSegments: [TranscriptSegment]
+    ) async {
+        let whisperSegments = await whisperTranscriber.transcribe(audioPath: audioPath)
+
+        // If whisper produced segments, replace the live transcript; otherwise keep it
+        if !whisperSegments.isEmpty {
+            meeting.transcript = whisperSegments
+        }
+        // else: keep liveSegments already stored on the meeting
+
+        meeting.status = .done
+        meeting.updatedAt = Date()
+        activeMeeting = meeting
+
+        do {
+            try modelContext.save()
+        } catch {
+            audioEngine.error = "Failed to save final transcript: \(error.localizedDescription)"
         }
 
-        // Return to dashboard after stopping
+        // Return to dashboard after final transcription completes
         onReturnToDashboard?()
     }
 
