@@ -118,6 +118,18 @@ struct WorkspaceView: View {
                 }
             )
         }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                if let meeting = activeMeeting, meeting.status == .done {
+                    Button {
+                        exportToObsidian(meeting: meeting)
+                    } label: {
+                        Label("Export to Obsidian", systemImage: "square.and.arrow.up")
+                    }
+                    .help("Export to Obsidian vault")
+                }
+            }
+        }
         .animation(.easeInOut(duration: 0.25), value: transcriptVisible)
         .animation(.easeInOut(duration: 0.25), value: aiNotesVisible)
         .animation(.easeInOut(duration: 0.25), value: personalNotesVisible)
@@ -500,6 +512,25 @@ struct WorkspaceView: View {
         guard let meeting = activeMeeting else { return }
         meeting.updatedAt = Date()
         try? modelContext.save()
+    }
+
+    // MARK: - Obsidian Export
+
+    private func exportToObsidian(meeting: Meeting) {
+        let settings = AppSettings.current(in: modelContext)
+        guard let vaultPath = settings.obsidianVaultPath, !vaultPath.isEmpty else {
+            audioEngine.error = "Obsidian vault path not configured. Set it in Settings."
+            return
+        }
+
+        do {
+            let path = try ObsidianExporter.export(meeting: meeting, vaultPath: vaultPath)
+            meeting.obsidianPath = path
+            meeting.updatedAt = Date()
+            try? modelContext.save()
+        } catch {
+            audioEngine.error = "Export failed: \(error.localizedDescription)"
+        }
     }
 
     // MARK: - Meeting Loading
