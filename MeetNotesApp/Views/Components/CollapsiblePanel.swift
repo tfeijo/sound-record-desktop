@@ -30,9 +30,7 @@ struct CollapsiblePanel<Content: View>: View {
                     .lineLimit(1)
                 Spacer()
                 Button {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        isVisible = false
-                    }
+                    isVisible = false
                 } label: {
                     Image(systemName: "minus")
                         .font(.caption.weight(.bold))
@@ -65,9 +63,7 @@ struct CollapsiblePanel<Content: View>: View {
     private var collapsedView: some View {
         VStack(spacing: 8) {
             Button {
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    isVisible = true
-                }
+                isVisible = true
             } label: {
                 Image(systemName: "plus")
                     .font(.caption.weight(.bold))
