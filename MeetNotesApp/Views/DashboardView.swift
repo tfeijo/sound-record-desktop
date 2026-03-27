@@ -4,51 +4,68 @@ import SwiftData
 struct DashboardView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var audioEngine = AudioEngine()
+    @State private var liveTranscriber = LiveTranscriber()
 
     var body: some View {
-        VStack(spacing: 32) {
-            Spacer()
+        HStack(spacing: 0) {
+            // Left: Recording controls
+            VStack(spacing: 32) {
+                Spacer()
 
-            // Status text
-            Text(audioEngine.isRecording ? "Recording..." : "Ready to record")
-                .font(.title2)
-                .foregroundStyle(audioEngine.isRecording ? .red : .secondary)
+                // Status text
+                Text(audioEngine.isRecording ? "Recording..." : "Ready to record")
+                    .font(.title2)
+                    .foregroundStyle(audioEngine.isRecording ? .red : .secondary)
 
-            // Elapsed time
-            if audioEngine.isRecording {
-                Text(formattedElapsed)
-                    .font(.system(.title, design: .monospaced))
-                    .foregroundStyle(.primary)
-            }
-
-            // Record / Stop button
-            RecordButton(isRecording: audioEngine.isRecording) {
+                // Elapsed time
                 if audioEngine.isRecording {
-                    stopRecording()
-                } else {
-                    startRecording()
+                    Text(formattedElapsed)
+                        .font(.system(.title, design: .monospaced))
+                        .foregroundStyle(.primary)
                 }
-            }
 
-            // Audio level meter
-            if audioEngine.isRecording {
-                AudioLevelMeter(level: audioEngine.audioLevel)
-                    .frame(maxWidth: 300)
-                    .transition(.opacity)
-            }
+                // Record / Stop button
+                RecordButton(isRecording: audioEngine.isRecording) {
+                    if audioEngine.isRecording {
+                        stopRecording()
+                    } else {
+                        startRecording()
+                    }
+                }
 
-            // Error display
-            if let error = audioEngine.error {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .padding(.horizontal)
-            }
+                // Audio level meter
+                if audioEngine.isRecording {
+                    AudioLevelMeter(level: audioEngine.audioLevel)
+                        .frame(maxWidth: 300)
+                        .transition(.opacity)
+                }
 
-            Spacer()
+                // Error display
+                if let error = audioEngine.error ?? liveTranscriber.error {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .padding(.horizontal)
+                }
+
+                Spacer()
+            }
+            .padding()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            // Right: Live transcript panel (visible during recording)
+            if audioEngine.isRecording || !liveTranscriber.liveSegments.isEmpty {
+                TranscriptPanel(segments: liveTranscriber.liveSegments)
+                    .frame(minWidth: 280, idealWidth: 320, maxWidth: 400)
+                    .padding(.vertical, 8)
+                    .padding(.trailing, 8)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeInOut(duration: 0.3), value: audioEngine.isRecording)
+        .onAppear {
+            liveTranscriber.requestAuthorization()
+        }
     }
 
     // MARK: - Helpers
@@ -60,7 +77,15 @@ struct DashboardView: View {
     }
 
     private func startRecording() {
+        // Wire audio buffers from engine to transcriber
+        audioEngine.audioBufferHandler = { [liveTranscriber] buffer in
+            liveTranscriber.appendBuffer(buffer)
+        }
+
         let meetingID = audioEngine.startRecording()
+
+        // Start live transcription
+        liveTranscriber.start()
 
         // Create a Meeting record in SwiftData
         let meeting = Meeting(
@@ -82,13 +107,17 @@ struct DashboardView: View {
     private func stopRecording() {
         guard let meetingID = audioEngine.currentMeetingID else {
             audioEngine.stopRecording()
+            liveTranscriber.stop()
             return
         }
 
         let elapsed = audioEngine.elapsedSeconds
+
+        // Stop transcription first, then audio engine
+        liveTranscriber.stop()
         audioEngine.stopRecording()
 
-        // Update the Meeting record
+        // Update the Meeting record with transcript segments
         let descriptor = FetchDescriptor<Meeting>(
             predicate: #Predicate { $0.id == meetingID }
         )
@@ -96,6 +125,7 @@ struct DashboardView: View {
             meeting.endTime = Date()
             meeting.durationSeconds = elapsed
             meeting.status = .done
+            meeting.transcript = liveTranscriber.liveSegments
             meeting.updatedAt = Date()
             do {
                 try modelContext.save()
