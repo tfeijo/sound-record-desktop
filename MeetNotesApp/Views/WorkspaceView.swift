@@ -8,6 +8,7 @@ struct WorkspaceView: View {
     @State private var whisperTranscriber = WhisperTranscriber()
     @State private var speakerEngine = SpeakerEngine()
     @State private var summaryEngine = SummaryEngine()
+    @State private var comparisonEngine = ComparisonEngine()
     @State private var liveNotesEngine = LiveNotesEngine()
 
     /// Optional meeting passed in for viewing/resuming an existing meeting.
@@ -88,6 +89,18 @@ struct WorkspaceView: View {
             .padding(.horizontal, 8)
             .padding(.top, 8)
             .padding(.bottom, 4)
+
+            // Comparison section (shown after meeting is done with comparison results)
+            if activeMeeting?.comparison != nil || comparisonEngine.isProcessing {
+                Divider()
+                ComparisonView(
+                    comparison: activeMeeting?.comparison,
+                    isProcessing: comparisonEngine.isProcessing,
+                    error: comparisonEngine.error
+                )
+                .frame(maxHeight: 200)
+                .padding(.horizontal, 8)
+            }
 
             // Meeting header bar at the bottom
             MeetingHeaderBar(
@@ -433,6 +446,33 @@ struct WorkspaceView: View {
             try modelContext.save()
         } catch {
             audioEngine.error = "Failed to save summary: \(error.localizedDescription)"
+        }
+
+        // Run comparison if user has personal notes
+        if !meeting.personalNotes.isEmpty {
+            await runComparison(meeting: meeting)
+        }
+    }
+
+    // MARK: - Note Comparison
+
+    /// Compare user personal notes against AI-generated notes using the LLM.
+    private func runComparison(meeting: Meeting) async {
+        let settings = AppSettings.current(in: modelContext)
+
+        do {
+            let comparison = try await comparisonEngine.compare(
+                personalNotes: meeting.personalNotes,
+                aiNotes: meeting.aiNotes,
+                transcript: meeting.transcript,
+                settings: settings
+            )
+            meeting.comparison = comparison
+            meeting.updatedAt = Date()
+            try? modelContext.save()
+        } catch {
+            // Comparison failure is non-fatal
+            comparisonEngine.error = error.localizedDescription
         }
     }
 
