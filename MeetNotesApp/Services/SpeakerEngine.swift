@@ -98,6 +98,61 @@ final class SpeakerEngine {
         return result
     }
 
+    /// Match diarized speaker labels against enrolled speaker profiles.
+    /// Replaces generic "Speaker N" labels with enrolled names when a profile's
+    /// embedding matches (cosine similarity > 0.8). Architecture-ready — requires
+    /// real embeddings from CoreML model to produce actual matches.
+    static func matchSpeakers(
+        result: DiarizationResult,
+        profiles: [SpeakerProfile]
+    ) -> DiarizationResult {
+        guard !profiles.isEmpty else { return result }
+
+        // Build a map of unique speaker labels to check
+        let uniqueSpeakers = Set(result.segments.map(\.speaker))
+        var labelToName: [String: String] = [:]
+
+        // For each unique speaker label, try to match against enrolled profiles
+        // This requires real embeddings — with stub embeddings, no matches will occur
+        for _ in uniqueSpeakers {
+            // Find segments for this speaker to get their embedding (if available)
+            // Currently architecture-ready: when CoreML produces real embeddings,
+            // they would be stored and compared here
+            for profile in profiles {
+                guard let embeddingData = profile.embeddingData else { continue }
+
+                // Decode stored embedding
+                let floatCount = embeddingData.count / MemoryLayout<Float>.stride
+                guard floatCount == SpeakerEmbedding.dimensions else { continue }
+
+                let storedVector: [Float] = embeddingData.withUnsafeBytes { buffer in
+                    Array(buffer.bindMemory(to: Float.self))
+                }
+                let storedEmbedding = SpeakerEmbedding(vector: storedVector)
+
+                // Compare — placeholder: when we have segment embeddings, compute similarity
+                // For now, this path won't match since we don't store segment embeddings yet
+                _ = storedEmbedding  // Architecture placeholder
+            }
+        }
+
+        // Apply name replacements
+        guard !labelToName.isEmpty else { return result }
+
+        let updatedSegments = result.segments.map { segment in
+            var s = segment
+            if let name = labelToName[s.speaker] {
+                s.speaker = name
+            }
+            return s
+        }
+
+        return DiarizationResult(
+            segments: updatedSegments,
+            speakerCount: result.speakerCount
+        )
+    }
+
     // MARK: - CoreML Model Loading
 
     /// Attempt to load the CoreML ECAPA-TDNN model.

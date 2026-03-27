@@ -143,7 +143,7 @@ struct SettingsView: View {
             // MARK: - Speaker Profiles Section
 
             Section("Speaker Profiles") {
-                NavigationLink(destination: SpeakerManagerPlaceholderView()) {
+                NavigationLink(destination: SpeakerManagerView()) {
                     Label("Manage Speaker Profiles", systemImage: "person.2")
                 }
             }
@@ -218,25 +218,3 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - Speaker Manager Placeholder
-
-struct SpeakerManagerPlaceholderView: View {
-    var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "person.2.circle")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-
-            Text("Speaker Profiles")
-                .font(.title2)
-
-            Text("Speaker profile management will be available in a future update.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 300)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .navigationTitle("Speaker Profiles")
-    }
-}
