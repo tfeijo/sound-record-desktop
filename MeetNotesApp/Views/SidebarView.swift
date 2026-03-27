@@ -1,18 +1,42 @@
 import SwiftUI
+import SwiftData
 
 struct SidebarView: View {
+    @Query(sort: \Meeting.date, order: .reverse) private var meetings: [Meeting]
+    @Binding var selectedMeeting: Meeting?
+    var onSelectMeeting: ((Meeting) -> Void)?
+
     var body: some View {
-        List {
-            Text("No meetings yet")
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.top, 40)
+        List(selection: $selectedMeeting) {
+            if meetings.isEmpty {
+                Text("No meetings yet")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 40)
+            } else {
+                ForEach(meetings) { meeting in
+                    Button {
+                        onSelectMeeting?(meeting)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(meeting.title)
+                                .font(.headline)
+                                .lineLimit(1)
+                            Text(meeting.date, style: .date)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .tag(meeting)
+                }
+            }
         }
         .listStyle(.sidebar)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button(action: {
-                    // TODO: Start recording
+                    // TODO: Start recording via sidebar
                 }) {
                     Label("Record", systemImage: "record.circle")
                 }

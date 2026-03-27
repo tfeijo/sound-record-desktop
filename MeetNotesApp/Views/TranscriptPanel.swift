@@ -3,67 +3,87 @@ import SwiftUI
 struct TranscriptPanel: View {
     let segments: [TranscriptSegment]
 
+    @Environment(\.collapsiblePanelWrapped) private var isWrapped
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
-            HStack {
-                Image(systemName: "text.quote")
-                    .foregroundStyle(.secondary)
-                Text("Live Transcript")
-                    .font(.headline)
-                Spacer()
-                Text("\(segments.count) segment\(segments.count == 1 ? "" : "s")")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            // Show header only when NOT inside a CollapsiblePanel
+            if !isWrapped {
+                headerView
+                Divider()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-
-            Divider()
 
             if segments.isEmpty {
-                VStack(spacing: 8) {
-                    Spacer()
-                    Image(systemName: "waveform")
-                        .font(.largeTitle)
-                        .foregroundStyle(.tertiary)
-                    Text("Listening...")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Text("Transcript will appear as you speak")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                emptyStateView
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 8) {
-                            ForEach(segments) { segment in
-                                TranscriptSegmentRow(segment: segment)
-                                    .id(segment.id)
-                            }
-                        }
-                        .padding(12)
+                segmentListView
+            }
+        }
+        .background(isWrapped ? Color.clear : Color(nsColor: .windowBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: isWrapped ? 0 : 8))
+        .overlay(
+            Group {
+                if !isWrapped {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(.separator, lineWidth: 1)
+                }
+            }
+        )
+    }
+
+    // MARK: - Subviews
+
+    private var headerView: some View {
+        HStack {
+            Image(systemName: "text.quote")
+                .foregroundStyle(.secondary)
+            Text("Live Transcript")
+                .font(.headline)
+            Spacer()
+            Text("\(segments.count) segment\(segments.count == 1 ? "" : "s")")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private var emptyStateView: some View {
+        VStack(spacing: 8) {
+            Spacer()
+            Image(systemName: "waveform")
+                .font(.largeTitle)
+                .foregroundStyle(.tertiary)
+            Text("Listening...")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text("Transcript will appear as you speak")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var segmentListView: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(segments) { segment in
+                        TranscriptSegmentRow(segment: segment)
+                            .id(segment.id)
                     }
-                    .onChange(of: segments.count) { _, _ in
-                        // Auto-scroll to latest segment
-                        if let last = segments.last {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo(last.id, anchor: .bottom)
-                            }
-                        }
+                }
+                .padding(12)
+            }
+            .onChange(of: segments.count) { _, _ in
+                if let last = segments.last {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(last.id, anchor: .bottom)
                     }
                 }
             }
         }
-        .background(.background)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(.separator, lineWidth: 1)
-        )
     }
 }
 
