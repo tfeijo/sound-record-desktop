@@ -7,6 +7,7 @@ struct WorkspaceView: View {
     @State private var liveTranscriber = LiveTranscriber()
     @State private var whisperTranscriber = WhisperTranscriber()
     @State private var summaryEngine = SummaryEngine()
+    @State private var liveNotesEngine = LiveNotesEngine()
 
     /// Optional meeting passed in for viewing/resuming an existing meeting.
     var meeting: Meeting?
@@ -55,10 +56,13 @@ struct WorkspaceView: View {
                     isVisible: $aiNotesVisible
                 ) {
                     AINotesPanel(
-                        aiNotes: activeMeeting?.aiNotes,
+                        aiNotes: liveNotesEngine.currentNotes ?? activeMeeting?.aiNotes,
                         summary: activeMeeting?.summary,
                         isSummarizing: summaryEngine.isProcessing,
-                        summaryError: summaryEngine.error
+                        summaryError: summaryEngine.error,
+                        isLiveProcessing: liveNotesEngine.isProcessing,
+                        liveNotesError: liveNotesEngine.error,
+                        lastUpdateTime: liveNotesEngine.lastUpdateTime
                     )
                 }
 
@@ -116,6 +120,14 @@ struct WorkspaceView: View {
             guard activeMeeting != nil else { return }
             activeMeeting?.title = newValue
             activeMeeting?.updatedAt = Date()
+            try? modelContext.save()
+        }
+        .onChange(of: liveNotesEngine.lastUpdateTime) { _, _ in
+            // Persist live AI notes to the meeting after each LLM update
+            guard let meeting = activeMeeting,
+                  let notes = liveNotesEngine.currentNotes else { return }
+            meeting.aiNotes = notes
+            meeting.updatedAt = Date()
             try? modelContext.save()
         }
     }
@@ -225,6 +237,15 @@ struct WorkspaceView: View {
         let meetingID = audioEngine.startRecording()
         liveTranscriber.start()
 
+        // Start live AI notes extraction
+        let settings = AppSettings.current(in: modelContext)
+        liveNotesEngine.start(
+            transcriptProvider: { [liveTranscriber] in
+                liveTranscriber.liveSegments
+            },
+            settings: settings
+        )
+
         let title = "Meeting \(Self.dateFormatter.string(from: Date()))"
         meetingTitle = title
 
@@ -261,6 +282,7 @@ struct WorkspaceView: View {
 
         let elapsed = audioEngine.elapsedSeconds
         let liveSegments = liveTranscriber.liveSegments
+        let finalNotes = liveNotesEngine.stop()
 
         liveTranscriber.stop()
         audioEngine.stopRecording()
@@ -270,10 +292,11 @@ struct WorkspaceView: View {
         )
         guard let savedMeeting = try? modelContext.fetch(descriptor).first else { return }
 
-        // Save live transcript and transition to transcribing
+        // Save live transcript, AI notes, and transition to transcribing
         savedMeeting.endTime = Date()
         savedMeeting.durationSeconds = elapsed
         savedMeeting.transcript = liveSegments
+        savedMeeting.aiNotes = finalNotes
         savedMeeting.title = meetingTitle
         savedMeeting.status = .transcribing
         savedMeeting.updatedAt = Date()
