@@ -5,6 +5,9 @@ struct AINotesPanel: View {
     let summary: MeetingSummary?
     var isSummarizing: Bool = false
     var summaryError: String?
+    var isLiveProcessing: Bool = false
+    var liveNotesError: String?
+    var lastUpdateTime: Date?
 
     var body: some View {
         if isSummarizing {
@@ -13,10 +16,169 @@ struct AINotesPanel: View {
             errorView(summaryError)
         } else if let summary {
             summaryView(summary)
-        } else if let aiNotes, !aiNotes.topics.isEmpty {
-            aiNotesView(aiNotes)
+        } else if let aiNotes, !aiNotes.topics.isEmpty || !aiNotes.decisions.isEmpty || !aiNotes.actionItems.isEmpty {
+            liveAINotesView(aiNotes)
+        } else if isLiveProcessing {
+            liveProcessingView
         } else {
             placeholderView
+        }
+    }
+
+    // MARK: - Live AI Notes View
+
+    private func liveAINotesView(_ aiNotes: AINotes) -> some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Topics with [[wikilinks]]
+                    if !aiNotes.topics.isEmpty {
+                        wikilinksTopicsSection(aiNotes.topics)
+                    }
+
+                    // Decisions as bullet list
+                    if !aiNotes.decisions.isEmpty {
+                        sectionView(title: "Decisions", items: aiNotes.decisions)
+                    }
+
+                    // Action items as checkbox list
+                    if !aiNotes.actionItems.isEmpty {
+                        checkboxActionItemsSection(aiNotes.actionItems)
+                    }
+                }
+                .padding(12)
+            }
+
+            // Footer with update indicator
+            liveNotesFooter
+        }
+    }
+
+    // MARK: - Live Processing View
+
+    private var liveProcessingView: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            ProgressView()
+                .controlSize(.regular)
+            Text("Analyzing transcript...")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text("Live AI notes will appear shortly")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    // MARK: - Footer
+
+    private var liveNotesFooter: some View {
+        HStack {
+            if isLiveProcessing {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("Updating...")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else if let liveNotesError {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                Text(liveNotesError)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            if let lastUpdateTime {
+                TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                    let seconds = Int(timeline.date.timeIntervalSince(lastUpdateTime))
+                    Text("Updated \(formatTimeAgo(seconds))ago")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .separatorColor).opacity(0.3))
+    }
+
+    private func formatTimeAgo(_ seconds: Int) -> String {
+        if seconds < 5 {
+            return "just now "
+        } else if seconds < 60 {
+            return "\(seconds)s "
+        } else {
+            let minutes = seconds / 60
+            return "\(minutes)m "
+        }
+    }
+
+    // MARK: - Wikilinks Topics Section
+
+    private func wikilinksTopicsSection(_ topics: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Topics")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ForEach(topics, id: \.self) { topic in
+                HStack(alignment: .top, spacing: 6) {
+                    Text("\u{2022}")
+                        .foregroundStyle(.secondary)
+                    Text(highlightWikilinks(topic))
+                        .font(.body)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    /// Renders [[wikilinks]] with a distinct visual style (purple, medium weight).
+    private func highlightWikilinks(_ text: String) -> AttributedString {
+        var attributed = AttributedString(text)
+
+        // Find all [[...]] patterns and style them
+        var searchRange = attributed.startIndex..<attributed.endIndex
+        while let openRange = attributed[searchRange].range(of: "[["),
+              let closeRange = attributed[openRange.upperBound..<attributed.endIndex].range(of: "]]") {
+            let fullRange = openRange.lowerBound..<closeRange.upperBound
+            attributed[fullRange].foregroundColor = .purple
+            attributed[fullRange].font = .body.weight(.medium)
+            searchRange = closeRange.upperBound..<attributed.endIndex
+        }
+
+        return attributed
+    }
+
+    // MARK: - Checkbox Action Items Section
+
+    private func checkboxActionItemsSection(_ items: [ActionItem]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Action Items")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ForEach(items, id: \.description) { item in
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "square")
+                        .foregroundStyle(.blue)
+                        .font(.caption)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.description)
+                            .font(.body)
+                            .textSelection(.enabled)
+                        if let assignee = item.assignee {
+                            Text("@\(assignee)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -49,25 +211,6 @@ struct AINotesPanel: View {
                 // Topics
                 if !summary.topics.isEmpty {
                     topicsSection(summary.topics)
-                }
-            }
-            .padding(12)
-        }
-    }
-
-    // MARK: - AI Notes View (live/streaming)
-
-    private func aiNotesView(_ aiNotes: AINotes) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if !aiNotes.topics.isEmpty {
-                    sectionView(title: "Topics", items: aiNotes.topics)
-                }
-                if !aiNotes.decisions.isEmpty {
-                    sectionView(title: "Decisions", items: aiNotes.decisions)
-                }
-                if !aiNotes.actionItems.isEmpty {
-                    actionItemsSection(aiNotes.actionItems)
                 }
             }
             .padding(12)
