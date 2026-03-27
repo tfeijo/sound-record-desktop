@@ -4,6 +4,7 @@ import SwiftData
 struct ContentView: View {
     @State private var selectedMeeting: Meeting?
     @State private var showWorkspace = false
+    @State private var showSettings = false
 
     var body: some View {
         NavigationSplitView {
@@ -11,11 +12,21 @@ struct ContentView: View {
                 selectedMeeting: $selectedMeeting,
                 onSelectMeeting: { meeting in
                     selectedMeeting = meeting
+                    showSettings = false
                     showWorkspace = true
+                },
+                onOpenSettings: {
+                    withAnimation {
+                        showWorkspace = false
+                        selectedMeeting = nil
+                        showSettings = true
+                    }
                 }
             )
         } detail: {
-            if showWorkspace {
+            if showSettings {
+                SettingsView()
+            } else if showWorkspace {
                 WorkspaceView(
                     meeting: selectedMeeting,
                     onReturnToDashboard: {
