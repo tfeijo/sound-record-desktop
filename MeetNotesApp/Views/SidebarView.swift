@@ -12,6 +12,7 @@ struct SidebarView: View {
     @State private var searchText = ""
     @State private var meetingToDelete: Meeting?
     @State private var showDeleteConfirmation = false
+    @State private var exportError: String?
 
     private var filteredMeetings: [Meeting] {
         if searchText.isEmpty {
@@ -47,6 +48,14 @@ struct SidebarView: View {
                         }
                     }
                     .contextMenu {
+                        if meeting.status == .done {
+                            Button {
+                                exportMeeting(meeting)
+                            } label: {
+                                Label("Export to Obsidian", systemImage: "square.and.arrow.up")
+                            }
+                            Divider()
+                        }
                         Button(role: .destructive) {
                             meetingToDelete = meeting
                             showDeleteConfirmation = true
@@ -141,6 +150,23 @@ struct SidebarView: View {
     }
 
     // MARK: - Deletion
+
+    private func exportMeeting(_ meeting: Meeting) {
+        let settings = AppSettings.current(in: modelContext)
+        guard let vaultPath = settings.obsidianVaultPath, !vaultPath.isEmpty else {
+            exportError = "Obsidian vault path not configured. Set it in Settings."
+            return
+        }
+
+        do {
+            let path = try ObsidianExporter.export(meeting: meeting, vaultPath: vaultPath)
+            meeting.obsidianPath = path
+            meeting.updatedAt = Date()
+            try? modelContext.save()
+        } catch {
+            exportError = "Export failed: \(error.localizedDescription)"
+        }
+    }
 
     private func deleteMeeting(_ meeting: Meeting) {
         // Remove audio files from disk
