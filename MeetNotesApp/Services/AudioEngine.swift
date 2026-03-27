@@ -1,7 +1,7 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Observation
 
-@Observable
+@MainActor @Observable
 final class AudioEngine {
     // MARK: - Published State
 
@@ -9,12 +9,14 @@ final class AudioEngine {
     private(set) var audioLevel: Float = 0.0
     private(set) var elapsedSeconds: Int = 0
     private(set) var currentMeetingID: UUID?
-    private(set) var error: String?
+    var error: String?
 
     // MARK: - Private
 
     private var engine = AVAudioEngine()
-    private var audioFile: AVAudioFile?
+    private let fileLock = NSLock()
+    @ObservationIgnored private nonisolated(unsafe) var _audioFile: AVAudioFile?
+    private let writeQueue = DispatchQueue(label: "com.meetnotes.audiowrite")
     private var recordingStartTime: Date?
     private var levelTimer: Timer?
 
@@ -42,6 +44,20 @@ final class AudioEngine {
         audioLevel = 0.0
         elapsedSeconds = 0
 
+        // Check microphone permission first
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .denied, .restricted:
+            self.error = "Microphone access denied. Enable in System Settings > Privacy & Security > Microphone."
+            return meetingID
+        case .notDetermined:
+            // Will be triggered by inputNode access below
+            break
+        case .authorized:
+            break
+        @unknown default:
+            break
+        }
+
         do {
             try ensureRecordingsDirectory()
             let fileURL = Self.recordingsDirectory
@@ -68,12 +84,15 @@ final class AudioEngine {
             }
 
             // Create output WAV file with target format
-            audioFile = try AVAudioFile(
+            let file = try AVAudioFile(
                 forWriting: fileURL,
                 settings: targetFormat.settings,
                 commonFormat: .pcmFormatFloat32,
                 interleaved: false
             )
+            fileLock.lock()
+            _audioFile = file
+            fileLock.unlock()
 
             let bufferSize: AVAudioFrameCount = 4096
             inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: hardwareFormat) {
@@ -98,9 +117,13 @@ final class AudioEngine {
     func stopRecording() {
         guard isRecording else { return }
 
-        engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        audioFile = nil
+        engine.inputNode.removeTap(onBus: 0)
+
+        fileLock.lock()
+        _audioFile = nil
+        fileLock.unlock()
+
         isRecording = false
         recordingStartTime = nil
         stopElapsedTimer()
@@ -116,13 +139,16 @@ final class AudioEngine {
 
     // MARK: - Private Helpers
 
-    private func processBuffer(
+    private nonisolated func processBuffer(
         _ buffer: AVAudioPCMBuffer,
         converter: AVAudioConverter,
         targetFormat: AVAudioFormat
     ) {
         // Calculate audio level from the raw input buffer
-        updateAudioLevel(from: buffer)
+        let level = Self.calculateLevel(from: buffer)
+        Task { @MainActor [weak self] in
+            self?.audioLevel = level
+        }
 
         // Convert to target format and write
         let frameCapacity = AVAudioFrameCount(
@@ -135,26 +161,34 @@ final class AudioEngine {
               )
         else { return }
 
+        var hasProvidedData = false
         var conversionError: NSError?
         let status = converter.convert(to: convertedBuffer, error: &conversionError) { _, outStatus in
+            if hasProvidedData {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            hasProvidedData = true
             outStatus.pointee = .haveData
             return buffer
         }
 
         guard status != .error, conversionError == nil else { return }
 
-        do {
-            try audioFile?.write(from: convertedBuffer)
-        } catch {
-            // Silently drop buffer on write error to avoid flooding logs
+        // Write on a dedicated queue to avoid blocking the audio render thread
+        writeQueue.async { [weak self] in
+            guard let self else { return }
+            self.fileLock.lock()
+            defer { self.fileLock.unlock() }
+            try? self._audioFile?.write(from: convertedBuffer)
         }
     }
 
-    private func updateAudioLevel(from buffer: AVAudioPCMBuffer) {
-        guard let channelData = buffer.floatChannelData else { return }
+    private nonisolated static func calculateLevel(from buffer: AVAudioPCMBuffer) -> Float {
+        guard let channelData = buffer.floatChannelData else { return 0.0 }
         let channelSamples = channelData[0]
         let frameLength = Int(buffer.frameLength)
-        guard frameLength > 0 else { return }
+        guard frameLength > 0 else { return 0.0 }
 
         // RMS calculation
         var sumOfSquares: Float = 0.0
@@ -168,18 +202,17 @@ final class AudioEngine {
         // -60 dB (silence) to 0 dB (max) mapped to 0.0-1.0
         let minDb: Float = -60.0
         let db = 20.0 * log10f(max(rms, 1e-6))
-        let normalized = max(0.0, min(1.0, (db - minDb) / (-minDb)))
-
-        DispatchQueue.main.async { [weak self] in
-            self?.audioLevel = normalized
-        }
+        return max(0.0, min(1.0, (db - minDb) / (-minDb)))
     }
 
     private func startElapsedTimer() {
         levelTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) {
             [weak self] _ in
-            guard let self, let start = self.recordingStartTime else { return }
-            self.elapsedSeconds = Int(Date().timeIntervalSince(start))
+            guard let self else { return }
+            Task { @MainActor in
+                guard let start = self.recordingStartTime else { return }
+                self.elapsedSeconds = Int(Date().timeIntervalSince(start))
+            }
         }
     }
 
@@ -199,9 +232,11 @@ final class AudioEngine {
     }
 
     private func cleanup() {
-        engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        audioFile = nil
+        engine.inputNode.removeTap(onBus: 0)
+        fileLock.lock()
+        _audioFile = nil
+        fileLock.unlock()
         isRecording = false
         recordingStartTime = nil
         stopElapsedTimer()

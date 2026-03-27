@@ -72,7 +72,11 @@ struct DashboardView: View {
             micPath: AudioEngine.micPath(for: meetingID)
         )
         modelContext.insert(meeting)
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            audioEngine.error = "Failed to save meeting: \(error.localizedDescription)"
+        }
     }
 
     private func stopRecording() {
@@ -93,7 +97,11 @@ struct DashboardView: View {
             meeting.durationSeconds = elapsed
             meeting.status = .done
             meeting.updatedAt = Date()
-            try? modelContext.save()
+            do {
+                try modelContext.save()
+            } catch {
+                audioEngine.error = "Failed to update meeting: \(error.localizedDescription)"
+            }
         }
     }
 
