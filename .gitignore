@@ -8,6 +8,9 @@ out/
 # Rust
 target/
 
+# Swift
+.build/
+
 # Build
 dist/
 src-tauri/binaries/
