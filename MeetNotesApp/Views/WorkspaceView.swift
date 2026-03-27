@@ -137,6 +137,21 @@ struct WorkspaceView: View {
             .padding(.vertical, 8)
             .background(Color.red)
         }
+
+        if let warning = audioEngine.systemAudioWarning {
+            HStack(spacing: 8) {
+                Image(systemName: "speaker.slash.fill")
+                    .foregroundStyle(.black)
+                Text(warning)
+                    .font(.subheadline)
+                    .foregroundStyle(.black)
+                    .lineLimit(2)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.yellow.opacity(0.9))
+        }
     }
 
     // MARK: - Computed
@@ -173,7 +188,8 @@ struct WorkspaceView: View {
             date: Date(),
             startTime: Date(),
             status: .recording,
-            micPath: AudioEngine.micPath(for: meetingID)
+            micPath: AudioEngine.micPath(for: meetingID),
+            systemPath: AudioEngine.systemPath(for: meetingID)
         )
         modelContext.insert(newMeeting)
         activeMeeting = newMeeting
