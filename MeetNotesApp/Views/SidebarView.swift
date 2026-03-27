@@ -5,6 +5,7 @@ struct SidebarView: View {
     @Query(sort: \Meeting.date, order: .reverse) private var meetings: [Meeting]
     @Binding var selectedMeeting: Meeting?
     var onSelectMeeting: ((Meeting) -> Void)?
+    var onOpenSettings: (() -> Void)?
 
     var body: some View {
         List(selection: $selectedMeeting) {
@@ -42,6 +43,23 @@ struct SidebarView: View {
                 }
                 .help("Start a new recording")
             }
+        }
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                Spacer()
+                Button {
+                    onOpenSettings?()
+                } label: {
+                    Label("Settings", systemImage: "gear")
+                        .font(.subheadline)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Spacer()
+            }
+            .background(.bar)
         }
     }
 }
