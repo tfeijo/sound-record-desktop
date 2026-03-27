@@ -189,7 +189,7 @@ struct WorkspaceView: View {
             startTime: Date(),
             status: .recording,
             micPath: AudioEngine.micPath(for: meetingID),
-            systemPath: AudioEngine.systemPath(for: meetingID)
+            systemPath: audioEngine.systemAudioWarning == nil ? AudioEngine.systemPath(for: meetingID) : nil
         )
         modelContext.insert(newMeeting)
         activeMeeting = newMeeting

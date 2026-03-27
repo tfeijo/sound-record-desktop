@@ -50,7 +50,7 @@ final class SystemAudioRecorder: NSObject {
         // 2. Configure stream: audio-only (1x1 video to satisfy API requirement)
         let config = SCStreamConfiguration()
         config.capturesAudio = true
-        config.excludesCurrentProcessAudio = false
+        config.excludesCurrentProcessAudio = true
         config.sampleRate = 16_000
         config.channelCount = 1
         config.width = 1
@@ -116,7 +116,12 @@ final class SystemAudioRecorder: NSObject {
 
         stream = nil
         isCapturing = false
-        setAudioFile(nil)
+        // Drain pending writes before closing file
+        writeQueue.sync {
+            fileLock.lock()
+            _audioFile = nil
+            fileLock.unlock()
+        }
     }
 
     // MARK: - File Path Helper
