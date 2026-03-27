@@ -89,6 +89,7 @@ struct MeetingHeaderBar: View {
         switch status {
         case .recording: return .red
         case .transcribing: return .orange
+        case .diarizing: return .purple
         case .summarizing: return .blue
         case .done: return .green
         case .error: return .red
@@ -99,6 +100,7 @@ struct MeetingHeaderBar: View {
         switch status {
         case .recording: return "Recording"
         case .transcribing: return "Transcribing"
+        case .diarizing: return "Identifying Speakers"
         case .summarizing: return "Summarizing"
         case .done: return "Done"
         case .error: return "Error"

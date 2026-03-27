@@ -6,6 +6,7 @@ struct WorkspaceView: View {
     @State private var audioEngine = AudioEngine()
     @State private var liveTranscriber = LiveTranscriber()
     @State private var whisperTranscriber = WhisperTranscriber()
+    @State private var speakerEngine = SpeakerEngine()
     @State private var summaryEngine = SummaryEngine()
     @State private var liveNotesEngine = LiveNotesEngine()
 
@@ -136,7 +137,7 @@ struct WorkspaceView: View {
 
     @ViewBuilder
     private var errorBanner: some View {
-        if let error = audioEngine.error ?? liveTranscriber.error ?? whisperTranscriber.error ?? summaryEngine.error {
+        if let error = audioEngine.error ?? liveTranscriber.error ?? whisperTranscriber.error ?? speakerEngine.error ?? summaryEngine.error {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.white)
@@ -149,6 +150,7 @@ struct WorkspaceView: View {
                     audioEngine.error = nil
                     liveTranscriber.error = nil
                     whisperTranscriber.error = nil
+                    speakerEngine.error = nil
                     summaryEngine.error = nil
                 } label: {
                     Image(systemName: "xmark.circle.fill")
@@ -174,6 +176,22 @@ struct WorkspaceView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(Color.yellow.opacity(0.9))
+        }
+
+        // Speaker diarization progress banner
+        if speakerEngine.isProcessing {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+
+                Text("Identifying speakers...")
+                    .font(.subheadline.weight(.medium))
+
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.purple.opacity(0.1))
         }
 
         // Whisper transcription progress banner
@@ -337,11 +355,39 @@ struct WorkspaceView: View {
             audioEngine.error = "Failed to save final transcript: \(error.localizedDescription)"
         }
 
+        // Run speaker diarization on the final transcript
+        await runDiarization(meeting: meeting, audioPath: audioPath)
+
         // Run LLM summarization on the final transcript
         await runSummarization(meeting: meeting)
 
         // Return to dashboard after summarization completes
         onReturnToDashboard?()
+    }
+
+    // MARK: - Speaker Diarization
+
+    /// Run speaker diarization on the meeting's transcript segments.
+    /// Updates segments with speaker labels and sets meeting.speakerCount.
+    private func runDiarization(meeting: Meeting, audioPath: String) async {
+        let segments = meeting.transcript
+        guard !segments.isEmpty else { return }
+
+        meeting.status = .diarizing
+        meeting.updatedAt = Date()
+        try? modelContext.save()
+
+        let result = await speakerEngine.diarize(segments: segments, audioPath: audioPath)
+
+        meeting.transcript = result.segments
+        meeting.speakerCount = result.speakerCount
+        meeting.updatedAt = Date()
+
+        do {
+            try modelContext.save()
+        } catch {
+            audioEngine.error = "Failed to save diarization: \(error.localizedDescription)"
+        }
     }
 
     // MARK: - Summarization

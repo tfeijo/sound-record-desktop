@@ -258,6 +258,8 @@ private struct StatusBadge: View {
             return .red
         case .transcribing:
             return .orange
+        case .diarizing:
+            return .purple
         case .summarizing:
             return .orange
         case .done:
@@ -273,6 +275,8 @@ private struct StatusBadge: View {
             return "Recording"
         case .transcribing:
             return "Transcribing"
+        case .diarizing:
+            return "Diarizing"
         case .summarizing:
             return "Summarizing"
         case .done:
