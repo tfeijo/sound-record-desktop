@@ -18,7 +18,7 @@ enum SummaryProvider: String, Codable {
 
 // MARK: - Codable Structs
 
-struct TranscriptSegment: Codable, Identifiable {
+struct TranscriptSegment: Codable, Identifiable, Hashable {
     var id: UUID
     var speaker: String
     var start: Double   // seconds
@@ -27,42 +27,52 @@ struct TranscriptSegment: Codable, Identifiable {
     var confidence: Double
 }
 
-struct PersonalNote: Codable, Identifiable {
+struct PersonalNote: Codable, Identifiable, Hashable {
     var id: UUID
     var text: String
     var timestamp: Double   // seconds into meeting
     var createdAt: Date
 }
 
-struct AINotes: Codable {
+struct AINotes: Codable, Hashable {
     var topics: [String]        // with [[wikilinks]]
     var decisions: [String]
-    var actionItems: [String]
+    var actionItems: [ActionItem]
     var lastUpdated: Date
 }
 
-struct NoteComparison: Codable {
+struct ActionItem: Codable, Hashable {
+    var description: String
+    var assignee: String?
+}
+
+struct NoteComparison: Codable, Hashable {
     var aligned: [ComparisonItem]
     var userOnly: [ComparisonItem]
     var aiOnly: [ComparisonItem]
     var conflicts: [ComparisonItem]
 }
 
-struct ComparisonItem: Codable {
+struct ComparisonItem: Codable, Hashable {
     var description: String
     var userNote: String?
     var aiNote: String?
 }
 
-struct MeetingSummary: Codable {
+struct MeetingSummary: Codable, Hashable {
     var title: String
     var summary: String
     var decisions: [String]
-    var actionItems: [String]
-    var topics: [String]
+    var actionItems: [ActionItem]
+    var topics: [Topic]
 }
 
-struct PanelState: Codable {
+struct Topic: Codable, Hashable {
+    var title: String
+    var summary: String?
+}
+
+struct PanelState: Codable, Hashable {
     var transcriptVisible: Bool
     var aiNotesVisible: Bool
     var personalNotesVisible: Bool

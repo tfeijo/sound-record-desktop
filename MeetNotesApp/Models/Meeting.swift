@@ -3,14 +3,15 @@ import SwiftData
 
 @Model
 final class Meeting {
-    var id: UUID
-    var name: String
+    @Attribute(.unique) var id: UUID
+    var title: String
     var date: Date
     var startTime: Date?
     var endTime: Date?
-    var durationSeconds: Double
+    var durationSeconds: Int
     var speakerCount: Int
     var status: MeetingStatus
+    var audioPath: String?
     var micPath: String?
     var systemPath: String?
     var transcript: [TranscriptSegment]
@@ -27,13 +28,14 @@ final class Meeting {
 
     init(
         id: UUID = UUID(),
-        name: String = "",
+        title: String = "",
         date: Date = Date(),
         startTime: Date? = nil,
         endTime: Date? = nil,
-        durationSeconds: Double = 0,
+        durationSeconds: Int = 0,
         speakerCount: Int = 0,
         status: MeetingStatus = .recording,
+        audioPath: String? = nil,
         micPath: String? = nil,
         systemPath: String? = nil,
         transcript: [TranscriptSegment] = [],
@@ -49,13 +51,14 @@ final class Meeting {
         updatedAt: Date = Date()
     ) {
         self.id = id
-        self.name = name
+        self.title = title
         self.date = date
         self.startTime = startTime
         self.endTime = endTime
         self.durationSeconds = durationSeconds
         self.speakerCount = speakerCount
         self.status = status
+        self.audioPath = audioPath
         self.micPath = micPath
         self.systemPath = systemPath
         self.transcript = transcript

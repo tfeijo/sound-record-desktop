@@ -8,8 +8,6 @@ final class AppSettings {
     var language: String
     var autoRecord: Bool
     var summaryProvider: SummaryProvider
-    var anthropicApiKey: String?
-    var googleApiKey: String?
     var ollamaModel: String?
     var obsidianVaultPath: String?
 
@@ -19,8 +17,6 @@ final class AppSettings {
         language: String = "en",
         autoRecord: Bool = false,
         summaryProvider: SummaryProvider = .claude,
-        anthropicApiKey: String? = nil,
-        googleApiKey: String? = nil,
         ollamaModel: String? = nil,
         obsidianVaultPath: String? = nil
     ) {
@@ -29,9 +25,17 @@ final class AppSettings {
         self.language = language
         self.autoRecord = autoRecord
         self.summaryProvider = summaryProvider
-        self.anthropicApiKey = anthropicApiKey
-        self.googleApiKey = googleApiKey
         self.ollamaModel = ollamaModel
         self.obsidianVaultPath = obsidianVaultPath
+    }
+
+    static func current(in context: ModelContext) -> AppSettings {
+        let descriptor = FetchDescriptor<AppSettings>()
+        if let existing = try? context.fetch(descriptor).first {
+            return existing
+        }
+        let settings = AppSettings()
+        context.insert(settings)
+        return settings
     }
 }
