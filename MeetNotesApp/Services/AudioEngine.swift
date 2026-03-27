@@ -11,6 +11,10 @@ final class AudioEngine {
     private(set) var currentMeetingID: UUID?
     var error: String?
 
+    /// Callback invoked with each raw audio buffer from the hardware mic tap.
+    /// Set this before calling `startRecording()` to receive buffers (e.g., for live transcription).
+    @ObservationIgnored nonisolated(unsafe) var audioBufferHandler: ((AVAudioPCMBuffer) -> Void)?
+
     // MARK: - Private
 
     private var engine = AVAudioEngine()
@@ -98,6 +102,8 @@ final class AudioEngine {
             inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: hardwareFormat) {
                 [weak self] buffer, _ in
                 guard let self else { return }
+                // Forward raw buffer to external handler (e.g., LiveTranscriber)
+                self.audioBufferHandler?(buffer)
                 self.processBuffer(buffer, converter: converter, targetFormat: targetFormat)
             }
 
@@ -124,6 +130,7 @@ final class AudioEngine {
         _audioFile = nil
         fileLock.unlock()
 
+        audioBufferHandler = nil
         isRecording = false
         recordingStartTime = nil
         stopElapsedTimer()
