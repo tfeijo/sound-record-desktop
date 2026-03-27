@@ -5,10 +5,7 @@ struct ContentView: View {
         NavigationSplitView {
             SidebarView()
         } detail: {
-            Text("Select a meeting or start a new recording")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            DashboardView()
         }
         .navigationTitle("MeetNotes")
     }
