@@ -1,6 +1,6 @@
 @preconcurrency import AVFoundation
 import Observation
-import Speech
+@preconcurrency import Speech
 
 @MainActor @Observable
 final class LiveTranscriber {
@@ -36,8 +36,11 @@ final class LiveTranscriber {
     @ObservationIgnored private nonisolated(unsafe) var currentPartialText: String = ""
     @ObservationIgnored private nonisolated(unsafe) var currentChunkFinalText: String = ""
 
-    /// Audio format from the hardware, set once on first buffer.
-    @ObservationIgnored private nonisolated(unsafe) var audioFormat: AVAudioFormat?
+    /// Stable ID for the live segment to avoid view churn from UUID regeneration.
+    @ObservationIgnored private nonisolated(unsafe) var currentLiveSegmentID: UUID = UUID()
+
+    /// Text accumulated by the overlap chunk before it becomes current, used for immediate display after rotation.
+    @ObservationIgnored private nonisolated(unsafe) var pendingOverlapText: String = ""
 
     private let chunkDuration: TimeInterval = 55.0
     private let overlapDuration: TimeInterval = 5.0
@@ -66,7 +69,9 @@ final class LiveTranscriber {
         previousChunkLastWords = []
         currentPartialText = ""
         currentChunkFinalText = ""
+        pendingOverlapText = ""
         chunkIndex = 0
+        currentLiveSegmentID = UUID()
 
         speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
         guard let speechRecognizer, speechRecognizer.isAvailable else {
@@ -108,18 +113,16 @@ final class LiveTranscriber {
         nextRequest = nil
 
         speechRecognizer = nil
-        audioFormat = nil
     }
 
     /// Append an audio buffer from AudioEngine. Called from the audio tap (non-main thread).
+    /// Serialized on transcriptionQueue to prevent data races with chunk rotation.
     nonisolated func appendBuffer(_ buffer: AVAudioPCMBuffer) {
-        // Store format on first buffer
-        if audioFormat == nil {
-            audioFormat = buffer.format
+        transcriptionQueue.async { [weak self] in
+            guard let self else { return }
+            self.currentRequest?.append(buffer)
+            self.nextRequest?.append(buffer)
         }
-
-        currentRequest?.append(buffer)
-        nextRequest?.append(buffer)
     }
 
     // MARK: - Chunk Management
@@ -165,7 +168,7 @@ final class LiveTranscriber {
         let oTimer = DispatchSource.makeTimerSource(queue: transcriptionQueue)
         oTimer.schedule(deadline: .now() + overlapStartDelay, repeating: chunkDuration)
         oTimer.setEventHandler { [weak self] in
-            guard let self, self.isTranscribing else { return }
+            guard let self else { return }
             Task { @MainActor [weak self] in
                 guard let self, self.isTranscribing else { return }
                 self.nextChunkStartTime = self.chunkStartTime + overlapStartDelay
@@ -179,7 +182,7 @@ final class LiveTranscriber {
         let cTimer = DispatchSource.makeTimerSource(queue: transcriptionQueue)
         cTimer.schedule(deadline: .now() + chunkDuration, repeating: chunkDuration)
         cTimer.setEventHandler { [weak self] in
-            guard let self, self.isTranscribing else { return }
+            guard let self else { return }
             Task { @MainActor [weak self] in
                 guard let self, self.isTranscribing else { return }
                 self.rotateChunk()
@@ -208,56 +211,68 @@ final class LiveTranscriber {
             finalizedSegments.append(segment)
         }
 
-        // End current chunk
-        currentTask?.finish()
-        currentRequest?.endAudio()
+        // End current chunk — dispatch request/task mutations onto transcriptionQueue
+        // to synchronize with appendBuffer
+        let oldRequest = currentRequest
+        let oldTask = currentTask
+        let newRequest = nextRequest
+        let newTask = nextTask
 
-        // Promote next chunk to current
-        currentRequest = nextRequest
-        currentTask = nextTask
-        nextRequest = nil
-        nextTask = nil
+        transcriptionQueue.async { [weak self] in
+            guard let self else { return }
+            oldTask?.finish()
+            oldRequest?.endAudio()
+
+            // Promote next chunk to current
+            self.currentRequest = newRequest
+            self.currentTask = newTask
+            self.nextRequest = nil
+            self.nextTask = nil
+        }
 
         chunkStartTime = nextChunkStartTime
         currentChunkFinalText = ""
-        currentPartialText = ""
+        // Immediately show overlap chunk's accumulated text to avoid visible gap
+        currentPartialText = pendingOverlapText
+        pendingOverlapText = ""
         chunkIndex += 1
+        currentLiveSegmentID = UUID()
 
         updateLiveSegments()
     }
 
     // MARK: - Recognition Result Handling
 
+    /// Handles recognition results from the speech recognizer callback.
+    /// Dispatches all state mutations to MainActor to avoid data races.
     private nonisolated func handleRecognitionResult(
         result: SFSpeechRecognitionResult?,
         error: Error?,
         chunkStartOffset: TimeInterval,
         isOverlapChunk: Bool
     ) {
-        if let error {
-            let msg = error.localizedDescription
-            // Ignore cancellation errors during normal stop
-            if (error as NSError).code != 216 { // kAFAssistantErrorDomain canceled
-                Task { @MainActor [weak self] in
-                    // Only set error if still transcribing
-                    if self?.isTranscribing == true {
-                        self?.error = "Recognition error: \(msg)"
-                    }
-                }
-            }
-            return
-        }
-
-        guard let result else { return }
-
-        let text = result.bestTranscription.formattedString
-        let isFinal = result.isFinal
-
         Task { @MainActor [weak self] in
             guard let self else { return }
 
+            if let error {
+                let msg = error.localizedDescription
+                // Ignore cancellation errors during normal stop
+                if (error as NSError).code != 216 { // kAFAssistantErrorDomain canceled
+                    if self.isTranscribing {
+                        self.error = "Recognition error: \(msg)"
+                    }
+                }
+                return
+            }
+
+            guard let result else { return }
+
+            let text = result.bestTranscription.formattedString
+            let isFinal = result.isFinal
+
             if isOverlapChunk {
-                // For overlap chunk, don't update display yet -- it becomes current after rotation
+                // Track overlap text for immediate display after rotation
+                self.pendingOverlapText = text
                 if isFinal {
                     self.currentChunkFinalText = text
                 }
@@ -288,7 +303,7 @@ final class LiveTranscriber {
             if !deduplicatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let elapsed = recordingStartDate.map { Date().timeIntervalSince($0) } ?? 0
                 let segment = TranscriptSegment(
-                    id: UUID(),
+                    id: currentLiveSegmentID,
                     speaker: "Speaker",
                     start: chunkStartTime,
                     end: elapsed,

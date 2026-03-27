@@ -113,7 +113,9 @@ struct DashboardView: View {
 
         let elapsed = audioEngine.elapsedSeconds
 
-        // Stop transcription first, then audio engine
+        // Capture segments before stopping to avoid reading cleared state
+        let finalSegments = liveTranscriber.liveSegments
+
         liveTranscriber.stop()
         audioEngine.stopRecording()
 
@@ -125,7 +127,7 @@ struct DashboardView: View {
             meeting.endTime = Date()
             meeting.durationSeconds = elapsed
             meeting.status = .done
-            meeting.transcript = liveTranscriber.liveSegments
+            meeting.transcript = finalSegments
             meeting.updatedAt = Date()
             do {
                 try modelContext.save()
