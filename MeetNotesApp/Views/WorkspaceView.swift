@@ -14,7 +14,6 @@ struct WorkspaceView: View {
     /// The active meeting being recorded or viewed.
     @State private var activeMeeting: Meeting?
     @State private var meetingTitle: String = ""
-    @State private var personalNotesText: String = ""
 
     // Panel visibility state
     @State private var transcriptVisible: Bool = true
@@ -63,8 +62,14 @@ struct WorkspaceView: View {
                     isVisible: $personalNotesVisible
                 ) {
                     PersonalNotesPanel(
-                        notesText: $personalNotesText,
-                        elapsedSeconds: audioEngine.elapsedSeconds
+                        notes: Binding(
+                            get: { activeMeeting?.personalNotes ?? [] },
+                            set: { newNotes in
+                                activeMeeting?.personalNotes = newNotes
+                            }
+                        ),
+                        elapsedSeconds: audioEngine.elapsedSeconds,
+                        onSave: { savePersonalNotes() }
                     )
                 }
             }
@@ -105,9 +110,6 @@ struct WorkspaceView: View {
             activeMeeting?.title = newValue
             activeMeeting?.updatedAt = Date()
             try? modelContext.save()
-        }
-        .onChange(of: personalNotesText) { _, newValue in
-            savePersonalNotes(newValue)
         }
     }
 
@@ -175,7 +177,6 @@ struct WorkspaceView: View {
 
         let title = "Meeting \(Self.dateFormatter.string(from: Date()))"
         meetingTitle = title
-        personalNotesText = ""
 
         // Reset panel state to defaults for new meeting
         transcriptVisible = true
@@ -254,25 +255,12 @@ struct WorkspaceView: View {
         aiNotesVisible = state.aiNotesVisible
         personalNotesVisible = state.personalNotesVisible
         meetingTitle = meeting.title
-
-        // Restore personal notes text from meeting's personalNotes
-        personalNotesText = meeting.personalNotes
-            .sorted { $0.createdAt < $1.createdAt }
-            .map(\.text)
-            .joined(separator: "\n")
     }
 
-    private func savePersonalNotes(_ text: String) {
+    private func savePersonalNotes() {
         guard let meeting = activeMeeting else { return }
-        // Always replace entire personalNotes array with a single note
-        let note = PersonalNote(
-            id: meeting.personalNotes.first?.id ?? UUID(),
-            text: text,
-            timestamp: Double(audioEngine.elapsedSeconds),
-            createdAt: meeting.personalNotes.first?.createdAt ?? Date()
-        )
-        meeting.personalNotes = [note]
         meeting.updatedAt = Date()
+        try? modelContext.save()
     }
 
     // MARK: - Meeting Loading
