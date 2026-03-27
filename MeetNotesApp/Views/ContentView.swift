@@ -21,6 +21,13 @@ struct ContentView: View {
                         selectedMeeting = nil
                         showSettings = true
                     }
+                },
+                onStartRecording: {
+                    withAnimation {
+                        showSettings = false
+                        selectedMeeting = nil
+                        showWorkspace = true
+                    }
                 }
             )
         } detail: {
