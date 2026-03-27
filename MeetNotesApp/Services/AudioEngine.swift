@@ -11,6 +11,12 @@ final class AudioEngine {
     private(set) var currentMeetingID: UUID?
     var error: String?
 
+    /// Warning when system audio capture is unavailable (e.g., Screen Recording permission denied).
+    /// The mic continues recording even when this is set.
+    var systemAudioWarning: String? {
+        systemAudioRecorder.warning
+    }
+
     /// Callback invoked with each raw audio buffer from the hardware mic tap.
     /// Set this before calling `startRecording()` to receive buffers (e.g., for live transcription).
     @ObservationIgnored nonisolated(unsafe) var audioBufferHandler: ((AVAudioPCMBuffer) -> Void)?
@@ -23,6 +29,9 @@ final class AudioEngine {
     private let writeQueue = DispatchQueue(label: "com.meetnotes.audiowrite")
     private var recordingStartTime: Date?
     private var levelTimer: Timer?
+
+    /// System audio recorder using ScreenCaptureKit
+    private let systemAudioRecorder = SystemAudioRecorder()
 
     // MARK: - Recording Directory
 
@@ -112,6 +121,11 @@ final class AudioEngine {
             recordingStartTime = Date()
             startElapsedTimer()
 
+            // Start system audio capture in parallel (non-blocking)
+            Task {
+                await systemAudioRecorder.startCapture(meetingID: meetingID)
+            }
+
         } catch {
             self.error = "Recording failed: \(error.localizedDescription)"
             cleanup()
@@ -135,13 +149,23 @@ final class AudioEngine {
         recordingStartTime = nil
         stopElapsedTimer()
         audioLevel = 0.0
+
+        // Stop system audio capture
+        Task {
+            await systemAudioRecorder.stopCapture()
+        }
     }
 
-    /// The file path for a given meeting UUID.
+    /// The file path for a given meeting UUID (microphone).
     static func micPath(for meetingID: UUID) -> String {
         recordingsDirectory
             .appendingPathComponent("meeting_\(meetingID.uuidString)_mic.wav")
             .path
+    }
+
+    /// The file path for a given meeting UUID (system audio).
+    static func systemPath(for meetingID: UUID) -> String {
+        SystemAudioRecorder.systemPath(for: meetingID)
     }
 
     // MARK: - Private Helpers
